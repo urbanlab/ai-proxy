@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+aiohttp
+pyyaml
+peewee
+tiktoken

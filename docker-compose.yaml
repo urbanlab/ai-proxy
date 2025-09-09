@@ -1,0 +1,14 @@
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-proxy-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/data
+      - ./backend:/app
+      - ./config.yaml:/config.yaml
