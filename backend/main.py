@@ -2,14 +2,14 @@ from fastapi import FastAPI, HTTPException, Depends, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from codecarbon import OfflineEmissionsTracker
 from typing import Optional, List, Dict, Any, AsyncGenerator
 import aiohttp
 import json
 import time
 import yaml
 import lib.db
-
-
+import os
 
 
 app = FastAPI(
@@ -55,7 +55,6 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
-    print(f"Verifying token: {token}")
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key
@@ -159,7 +158,10 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         while total_tokens > model_config['max_input_tokens'] and len(request_data['messages']) > 1:
             removed_msg = request_data['messages'].pop(0)
             total_tokens -= len(removed_msg['content'].split())
-    start_time = time.time()
+    
+    # start time for CO2 calculation
+    tracker = OfflineEmissionsTracker(country_iso_code="FRA")
+    tracker.start()
     if request.stream:
         # streaming response
         async def stream_generator():
@@ -177,8 +179,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             model_name=request.model,
             prompt=json.dumps([msg.dict() for msg in request.messages]),
             response=json.dumps(response_data),
-            co2_params=co2_params,
-            duration=end_time - start_time
+            co2=tracker.stop()
         )
         return response_data
 

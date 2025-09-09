@@ -3,4 +3,4 @@ uvicorn
 aiohttp
 pyyaml
 peewee
-tiktoken
+codecarbon
