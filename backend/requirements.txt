@@ -4,3 +4,4 @@ aiohttp
 pyyaml
 peewee
 codecarbon
+prometheus-client

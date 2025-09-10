@@ -135,7 +135,6 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
            
            async for line in resp.content:
                decoded_line = line.decode('utf-8')
-               print(f"Received chunk: {repr(decoded_line)}")  # Debug log
                if decoded_line.strip():
                    yield decoded_line
 
