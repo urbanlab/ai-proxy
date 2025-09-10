@@ -18,6 +18,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -26,8 +27,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # Security
 security = HTTPBearer()
+
 # Load configuration
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
@@ -40,7 +43,7 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         )
     for model in CONFIG['model_list']:
         if model['model_name'] == model_name:
-            return model['params']
+            return model  # Return the complete model config, not just params
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Model not found",
@@ -57,25 +60,30 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
         detail="Invalid or missing token or insufficient permissions",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
 def get_user_from_token(token: str) -> Optional[str]:
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key['name']
     return None
+
 # chat completion request and response models
 class UsageDetails(BaseModel):
     reasoning_tokens: Optional[int] = None
     accepted_prediction_tokens: Optional[int] = None
     rejected_prediction_tokens: Optional[int] = None
+
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
     prompt_tokens_details: Optional[UsageDetails] = None
     completion_tokens_details: Optional[UsageDetails] = None
+
 class Message(BaseModel):
     role: str
     content: str
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Message]
@@ -88,25 +96,28 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     usage: Optional[Usage] = None
+
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: Message
     finish_reason: Optional[str] = None
+
 class ChatCompletionResponse(BaseModel):
     id: str
     object: str
     created: int
     model: str
     choices: List[ChatCompletionResponseChoice]
-    usage: Optional[Usage] = None 
+    usage: Optional[Usage] = None
+
 # fetch chat completion from the model API streaming depends on verify_token
 async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
-    url = f"{model_config['api_base']}/chat/completions"
+    url = f"{model_config['params']['api_base']}/chat/completions"
     headers = {
         "Content-Type": "application/json",
     }
-    if model_config.get('api_key') and model_config['api_key'] != "no_token":
-        headers["Authorization"] = f"Bearer {model_config['api_key']}"
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=request_data) as resp:
             if resp.status != 200:
@@ -115,14 +126,15 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
             async for line in resp.content:
                 if line:
                     yield line.decode('utf-8')
+
 # fetch chat completion from the model API non-streaming
 async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
-    url = f"{model_config['api_base']}/chat/completions"
+    url = f"{model_config['params']['api_base']}/chat/completions"
     headers = {
         "Content-Type": "application/json",
     }
-    if model_config.get('api_key') and model_config['api_key'] != "no_token":
-        headers["Authorization"] = f"Bearer {model_config['api_key']}"
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=request_data) as resp:
             if resp.status != 200:
@@ -135,22 +147,27 @@ async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
     model_config = get_model_config(request.model, user_key)
     request_data = request.dict(by_alias=True)
-    if model_config.get('drop_params'):
+    
+    # FIX: Use the actual model name from config
+    request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
+    
+    if model_config['params'].get('drop_params'):
         # keep only model and messages
         request_data = {
             "model": request_data["model"],
             "messages": request_data["messages"]
         }
-    if model_config.get('max_input_tokens'):
+    if model_config['params'].get('max_input_tokens'):
         # truncate messages to fit max_input_tokens
         total_tokens = sum(len(msg['content'].split()) for msg in request_data['messages'])
-        while total_tokens > model_config['max_input_tokens'] and len(request_data['messages']) > 1:
+        while total_tokens > model_config['params']['max_input_tokens'] and len(request_data['messages']) > 1:
             removed_msg = request_data['messages'].pop(0)
             total_tokens -= len(removed_msg['content'].split())
     
     # start time for CO2 calculation
     tracker = OfflineEmissionsTracker(country_iso_code="FRA")
     tracker.start()
+    
     if request.stream:
         # streaming response
         async def stream_generator():
@@ -162,7 +179,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         response_data = await fetch_chat_completion(model_config, request_data)
         end_time = time.time()
         # log the request in the database
-        co2_params = model_config.get('co2', {'watt': 0, 'gram_per_kwh': 0})
+        co2_params = model_config['params'].get('co2', {'watt': 0, 'gram_per_kwh': 0})
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
             model_name=request.model,
@@ -171,6 +188,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             co2=tracker.stop()
         )
         return response_data
+
 # list models endpoint
 @app.get("/v1/models")
 async def list_models(user_key = Depends(verify_token)):
@@ -188,6 +206,7 @@ async def list_models(user_key = Depends(verify_token)):
         "object": "list",
         "data": models
     }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

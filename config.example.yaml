@@ -12,9 +12,6 @@ model_list:
           drop_params: true
           api_key: "no_token"
           max_input_tokens: 25000
-          co2:
-            watt: 500
-            gram_per_kwh: 50
      
   - model_name: devstral
     params:
@@ -23,9 +20,6 @@ model_list:
       drop_params: true
       api_key: "no_token"
       max_input_tokens: 25000
-      co2:
-        watt: 500
-        gram_per_kwh: 50
 
 keys:
   - name: "user"
