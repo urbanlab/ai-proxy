@@ -4,3 +4,4 @@ config.yaml
 *.db
 emissions.csv
 backend/.~lock.emissions.csv#
+data/

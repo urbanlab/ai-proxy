@@ -12,3 +12,11 @@ services:
       - ./data:/data
       - ./backend:/app
       - ./config.yaml:/config.yaml
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: openwebui
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./data/openwebui_data:/app/backend/data

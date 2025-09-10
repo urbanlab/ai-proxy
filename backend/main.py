@@ -11,7 +11,6 @@ import yaml
 import lib.db
 import os
 
-
 app = FastAPI(
     title="LLM Proxy API",
     description="Proxy API for Large Language Models with authentication and rate limiting",
@@ -19,7 +18,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
-
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -28,14 +26,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Security
 security = HTTPBearer()
-
 # Load configuration
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
-
 
 def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any]:
     if model_name not in user_key['models']:
@@ -51,7 +46,6 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         detail="Model not found",
     )
 
-
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -63,19 +57,16 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
         detail="Invalid or missing token or insufficient permissions",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
 def get_user_from_token(token: str) -> Optional[str]:
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key['name']
     return None
-
 # chat completion request and response models
 class UsageDetails(BaseModel):
     reasoning_tokens: Optional[int] = None
     accepted_prediction_tokens: Optional[int] = None
     rejected_prediction_tokens: Optional[int] = None
-
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
@@ -108,7 +99,6 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: Optional[Usage] = None 
-
 # fetch chat completion from the model API streaming depends on verify_token
 async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
     url = f"{model_config['api_base']}/chat/completions"
@@ -139,7 +129,6 @@ async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict
                 text = await resp.text()
                 raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
             return await resp.json()
-
 
 # /chat/completions endpoint
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -182,7 +171,23 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             co2=tracker.stop()
         )
         return response_data
-
+# list models endpoint
+@app.get("/v1/models")
+async def list_models(user_key = Depends(verify_token)):
+    models = []
+    for model in CONFIG['model_list']:
+        if model['model_name'] in user_key['models']:
+            models.append({
+                "id": model['model_name'],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "organization",
+                "permission": [],
+            })
+    return {
+        "object": "list",
+        "data": models
+    }
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

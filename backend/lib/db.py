@@ -1,5 +1,4 @@
 from peewee import *
-import lib.co2 
 import os
 
 
