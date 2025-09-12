@@ -13,6 +13,35 @@ Many existing solutions are pseudo-open-source with hidden features behind paywa
 - Support for openai api endpoint
 
 
+## TODO
+- [ ] embedding routes
+- [ ] transcript routes
+- [ ] tts routes
+- basic stats (hours/days/weeks/months)
+    - [ ] models
+        - requests per model (line chart)
+        - tokens per model (line chart)
+        - model repartition (pie chart)
+        - average response latency per model (line chart)
+        - nb or requets per min per model (bar chart)
+    - [ ] user
+        - requests per user (bar chart)
+        - tokens per user (line chart)
+        - user repartition per token (pie chart)
+        - user repartition per request (pie chart)
+        - average response latency per user (line chart)
+        - nb or requets per min per user (bar chart)
+        - max token per request (line chart)
+        - min token per request (line chart)
+    - [ ] totals
+        - requests (bar chart)
+        - tokens (line chart)
+        - user repartition (pie chart)
+
+
+- gpu api agent
+
+
 ## Quickstart
 
 **Copy the example configuration file and edit it to your needs:**
