@@ -14,9 +14,11 @@ Many existing solutions are pseudo-open-source with hidden features behind paywa
 
 
 ## TODO
-- [ ] embedding routes
-- [ ] transcript routes
+- [x] embedding routes
+- [x] transcript routes
 - [ ] tts routes
+- [ ] streaming tts route
+- [ ] streaming transcript route
 - basic stats (hours/days/weeks/months)
     - [ ] models
         - requests per model (line chart)
