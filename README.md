@@ -16,31 +16,33 @@ Many existing solutions are pseudo-open-source with hidden features behind paywa
 ## TODO
 - [x] embedding routes
 - [x] transcript routes
-- [ ] tts routes
+- [x] tts routes
 - [ ] streaming tts route
 - [ ] streaming transcript route
 - basic stats (hours/days/weeks/months)
-    - [ ] models
-        - requests per model (line chart)
-        - tokens per model (line chart)
-        - model repartition (pie chart)
-        - average response latency per model (line chart)
+    - [x] models
+        OK - requests per model (line chart)
+        OK - tokens per model (line chart)
+        OK - model repartition (pie chart)
+        OK - average response latency per model (line chart)
         - nb or requets per min per model (bar chart)
     - [ ] user
-        - requests per user (bar chart)
-        - tokens per user (line chart)
-        - user repartition per token (pie chart)
+       OK - requests per user (bar chart)
+       OK - tokens per user (line chart)
+       OK - user repartition per token (pie chart)
         - user repartition per request (pie chart)
-        - average response latency per user (line chart)
+       OK - average response latency per user (line chart)
         - nb or requets per min per user (bar chart)
-        - max token per request (line chart)
-        - min token per request (line chart)
+        OK - max token per request (line chart)
+        OK - min token per request (line chart)
     - [ ] totals
-        - requests (bar chart)
+        OK - requests (bar chart)
         - tokens (line chart)
         - user repartition (pie chart)
 
-
+- FIX:
+    - [ ] support image upload
+    - [ ] Add cline support
 - gpu api agent
 
 

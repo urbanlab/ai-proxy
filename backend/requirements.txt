@@ -6,3 +6,4 @@ peewee
 codecarbon
 prometheus-client
 python-multipart
+tiktoken

@@ -17,6 +17,8 @@ class Requests(BaseModel):
     prompt = TextField()
     response = TextField()
     co2_emission = FloatField()
+    tokens_used = IntegerField(null=True) 
+    response_latency = FloatField(null=True)
     created_at = DateTimeField(constraints=[SQL('DEFAULT CURRENT_TIMESTAMP')])
 
 def init_db():
@@ -24,13 +26,15 @@ def init_db():
     db.create_tables([Requests])
     db.close()
 
-def create_request(user_name, model_name, prompt, response, co2):
+def create_request(user_name, model_name, prompt, response, co2, tokens_used=None, response_latency=None):
     req = Requests.create(
         user_name=user_name,
         model_name=model_name,
         prompt=prompt,
         response=response,
-        co2_emission=co2
+        co2_emission=co2,
+        tokens_used=tokens_used,
+        response_latency=response_latency
     )
     return req
 

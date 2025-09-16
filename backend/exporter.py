@@ -1,9 +1,9 @@
-from prometheus_client import Counter, Histogram, Gauge, start_http_server, REGISTRY, CollectorRegistry
+from prometheus_client import start_http_server, REGISTRY
 from prometheus_client.core import GaugeMetricFamily, CounterMetricFamily
 from prometheus_client.registry import Collector
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Tuple
 
 class SQLiteCollector(Collector):
@@ -18,194 +18,193 @@ class SQLiteCollector(Collector):
         cursor = conn.cursor()
         
         try:
-            # Total CO2 consumption
-            cursor.execute("SELECT SUM(co2_emission) FROM Requests")
-            total_co2 = cursor.fetchone()[0] or 0
-            yield GaugeMetricFamily('total_co2_emissions', 'Total CO2 emissions in grams', value=total_co2)
+            # Export raw time-series data
+            yield from self._get_timeseries_metrics(cursor)
             
-            # CO2 consumption by time periods
-            co2_periods = self._get_co2_by_periods(cursor)
-            yield GaugeMetricFamily('co2_emissions_daily', 'CO2 emissions today', value=co2_periods['day'])
-            yield GaugeMetricFamily('co2_emissions_weekly', 'CO2 emissions this week', value=co2_periods['week'])
-            yield GaugeMetricFamily('co2_emissions_monthly', 'CO2 emissions this month', value=co2_periods['month'])
-            yield GaugeMetricFamily('co2_emissions_yearly', 'CO2 emissions this year', value=co2_periods['year'])
+            # Export current totals (for single-value panels)
+            yield from self._get_current_totals(cursor)
             
-            # Total requests
-            cursor.execute("SELECT COUNT(*) FROM Requests")
-            total_requests = cursor.fetchone()[0] or 0
-            yield GaugeMetricFamily('total_requests', 'Total number of requests', value=total_requests)
-            
-            # Requests by time periods
-            request_periods = self._get_requests_by_periods(cursor)
-            yield GaugeMetricFamily('requests_hourly', 'Requests in last hour', value=request_periods['hour'])
-            yield GaugeMetricFamily('requests_daily', 'Requests today', value=request_periods['day'])
-            yield GaugeMetricFamily('requests_monthly', 'Requests this month', value=request_periods['month'])
-            
-            # Requests per user
-            cursor.execute("SELECT user_name, COUNT(*) FROM Requests GROUP BY user_name")
-            user_requests = cursor.fetchall()
-            user_request_metric = CounterMetricFamily('requests_per_user_total', 'Total requests per user', labels=['user'])
-            for user, count in user_requests:
-                user_request_metric.add_metric([user], count)
-            yield user_request_metric
-            
-            # Requests per user by time periods
-            yield from self._get_user_requests_by_periods(cursor)
-            
-            # Requests per model by time periods
-            yield from self._get_model_requests_by_periods(cursor)
-            
-            # CO2 emissions per model
-            cursor.execute("SELECT model_name, SUM(co2_emission) FROM Requests GROUP BY model_name")
-            model_co2 = cursor.fetchall()
-            model_co2_metric = CounterMetricFamily('co2_emissions_per_model_total', 'Total CO2 emissions per model', labels=['model'])
-            for model, co2 in model_co2:
-                model_co2_metric.add_metric([model], co2 or 0)
-            yield model_co2_metric
+            # Export distribution metrics (for pie charts)
+            yield from self._get_distribution_metrics(cursor)
             
         finally:
             conn.close()
     
-    def _get_co2_by_periods(self, cursor) -> Dict[str, float]:
-        periods = {}
+    def _get_timeseries_metrics(self, cursor):
+        """Export time-series data - let Grafana handle time filtering"""
         
-        # Day
+        # Requests per hour by model and user (time series)
         cursor.execute("""
-            SELECT SUM(co2_emission) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of day')
+            SELECT 
+                strftime('%s', datetime(strftime('%Y-%m-%d %H:00:00', created_at))) as timestamp,
+                model_name,
+                user_name,
+                COUNT(*) as requests,
+                COALESCE(SUM(tokens_used), 0) as tokens,
+                AVG(response_latency) as avg_latency,
+                COALESCE(SUM(co2_emission), 0) as co2
+            FROM requests 
+            WHERE created_at >= datetime('now', '-30 days')  -- Last 30 days
+            GROUP BY 
+                strftime('%Y-%m-%d %H:00:00', created_at),
+                model_name,
+                user_name
+            ORDER BY timestamp
         """)
-        periods['day'] = cursor.fetchone()[0] or 0
+        results = cursor.fetchall()
         
-        # Week
-        cursor.execute("""
-            SELECT SUM(co2_emission) FROM Requests 
-            WHERE created_at >= datetime('now', '-7 days')
-        """)
-        periods['week'] = cursor.fetchone()[0] or 0
+        # Create separate metrics for each measurement
+        requests_metric = GaugeMetricFamily(
+            'llm_requests_hourly', 
+            'Requests per hour by model and user', 
+            labels=['model', 'user', 'timestamp']
+        )
+        tokens_metric = GaugeMetricFamily(
+            'llm_tokens_hourly', 
+            'Tokens per hour by model and user', 
+            labels=['model', 'user', 'timestamp']
+        )
+        latency_metric = GaugeMetricFamily(
+            'llm_latency_hourly', 
+            'Average latency per hour by model and user', 
+            labels=['model', 'user', 'timestamp']
+        )
+        co2_metric = GaugeMetricFamily(
+            'llm_co2_hourly', 
+            'CO2 emissions per hour by model and user', 
+            labels=['model', 'user', 'timestamp']
+        )
         
-        # Month
-        cursor.execute("""
-            SELECT SUM(co2_emission) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of month')
-        """)
-        periods['month'] = cursor.fetchone()[0] or 0
+        for timestamp, model, user, requests, tokens, avg_latency, co2 in results:
+            labels = [model, user, str(timestamp)]
+            requests_metric.add_metric(labels, requests)
+            tokens_metric.add_metric(labels, tokens)
+            latency_metric.add_metric(labels, avg_latency or 0.0)
+            co2_metric.add_metric(labels, co2)
         
-        # Year
-        cursor.execute("""
-            SELECT SUM(co2_emission) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of year')
-        """)
-        periods['year'] = cursor.fetchone()[0] or 0
-        
-        return periods
+        yield requests_metric
+        yield tokens_metric
+        yield latency_metric
+        yield co2_metric
     
-    def _get_requests_by_periods(self, cursor) -> Dict[str, int]:
-        periods = {}
+    def _get_current_totals(self, cursor):
+        """Export current totals for single-value panels"""
         
-        # Hour
-        cursor.execute("""
-            SELECT COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', '-1 hour')
-        """)
-        periods['hour'] = cursor.fetchone()[0] or 0
+        # Total requests by model
+        cursor.execute("SELECT model_name, COUNT(*) FROM requests GROUP BY model_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_total_requests_by_model', 'Total requests by model', labels=['model'])
+        for model, count in results:
+            metric.add_metric([model], count)
+        yield metric
         
-        # Day
-        cursor.execute("""
-            SELECT COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of day')
-        """)
-        periods['day'] = cursor.fetchone()[0] or 0
+        # Total tokens by model
+        cursor.execute("SELECT model_name, COALESCE(SUM(tokens_used), 0) FROM requests GROUP BY model_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_total_tokens_by_model', 'Total tokens by model', labels=['model'])
+        for model, tokens in results:
+            metric.add_metric([model], tokens)
+        yield metric
         
-        # Month
-        cursor.execute("""
-            SELECT COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of month')
-        """)
-        periods['month'] = cursor.fetchone()[0] or 0
+        # Total requests by user
+        cursor.execute("SELECT user_name, COUNT(*) FROM requests GROUP BY user_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_total_requests_by_user', 'Total requests by user', labels=['user'])
+        for user, count in results:
+            metric.add_metric([user], count)
+        yield metric
         
-        return periods
-    
-    def _get_user_requests_by_periods(self, cursor):
-        # Requests per user per hour
-        cursor.execute("""
-            SELECT user_name, COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', '-1 hour')
-            GROUP BY user_name
-        """)
-        hourly_user_requests = cursor.fetchall()
-        hourly_metric = GaugeMetricFamily('requests_per_user_hourly', 'Requests per user in last hour', labels=['user'])
-        for user, count in hourly_user_requests:
-            hourly_metric.add_metric([user], count)
-        yield hourly_metric
+        # Total tokens by user
+        cursor.execute("SELECT user_name, COALESCE(SUM(tokens_used), 0) FROM requests GROUP BY user_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_total_tokens_by_user', 'Total tokens by user', labels=['user'])
+        for user, tokens in results:
+            metric.add_metric([user], tokens)
+        yield metric
         
-        # Requests per user per day
+        # Average latency by model
         cursor.execute("""
-            SELECT user_name, COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of day')
-            GROUP BY user_name
-        """)
-        daily_user_requests = cursor.fetchall()
-        daily_metric = GaugeMetricFamily('requests_per_user_daily', 'Requests per user today', labels=['user'])
-        for user, count in daily_user_requests:
-            daily_metric.add_metric([user], count)
-        yield daily_metric
-        
-        # Requests per user per month
-        cursor.execute("""
-            SELECT user_name, COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of month')
-            GROUP BY user_name
-        """)
-        monthly_user_requests = cursor.fetchall()
-        monthly_metric = GaugeMetricFamily('requests_per_user_monthly', 'Requests per user this month', labels=['user'])
-        for user, count in monthly_user_requests:
-            monthly_metric.add_metric([user], count)
-        yield monthly_metric
-    
-    def _get_model_requests_by_periods(self, cursor):
-        # Requests per model per hour
-        cursor.execute("""
-            SELECT model_name, COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', '-1 hour')
+            SELECT model_name, AVG(response_latency) 
+            FROM requests 
+            WHERE response_latency IS NOT NULL 
             GROUP BY model_name
         """)
-        hourly_model_requests = cursor.fetchall()
-        hourly_metric = GaugeMetricFamily('requests_per_model_hourly', 'Requests per model in last hour', labels=['model'])
-        for model, count in hourly_model_requests:
-            hourly_metric.add_metric([model], count)
-        yield hourly_metric
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_avg_latency_by_model', 'Average latency by model', labels=['model'])
+        for model, avg_latency in results:
+            metric.add_metric([model], avg_latency or 0.0)
+        yield metric
         
-        # Requests per model per day
+        # Average latency by user
         cursor.execute("""
-            SELECT model_name, COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of day')
-            GROUP BY model_name
+            SELECT user_name, AVG(response_latency) 
+            FROM requests 
+            WHERE response_latency IS NOT NULL 
+            GROUP BY user_name
         """)
-        daily_model_requests = cursor.fetchall()
-        daily_metric = GaugeMetricFamily('requests_per_model_daily', 'Requests per model today', labels=['model'])
-        for model, count in daily_model_requests:
-            daily_metric.add_metric([model], count)
-        yield daily_metric
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_avg_latency_by_user', 'Average latency by user', labels=['user'])
+        for user, avg_latency in results:
+            metric.add_metric([user], avg_latency or 0.0)
+        yield metric
         
-        # Requests per model per month
+        # Min/Max tokens per request by user
         cursor.execute("""
-            SELECT model_name, COUNT(*) FROM Requests 
-            WHERE created_at >= datetime('now', 'start of month')
-            GROUP BY model_name
+            SELECT user_name, MIN(tokens_used), MAX(tokens_used)
+            FROM requests 
+            WHERE tokens_used IS NOT NULL AND tokens_used > 0
+            GROUP BY user_name
         """)
-        monthly_model_requests = cursor.fetchall()
-        monthly_metric = GaugeMetricFamily('requests_per_model_monthly', 'Requests per model this month', labels=['model'])
-        for model, count in monthly_model_requests:
-            monthly_metric.add_metric([model], count)
-        yield monthly_metric
+        results = cursor.fetchall()
+        min_metric = GaugeMetricFamily('llm_min_tokens_by_user', 'Min tokens per request by user', labels=['user'])
+        max_metric = GaugeMetricFamily('llm_max_tokens_by_user', 'Max tokens per request by user', labels=['user'])
+        for user, min_tokens, max_tokens in results:
+            min_metric.add_metric([user], min_tokens or 0)
+            max_metric.add_metric([user], max_tokens or 0)
+        yield min_metric
+        yield max_metric
+    
+    def _get_distribution_metrics(self, cursor):
+        """Export distribution data for pie charts"""
+        
+        # User distribution by requests
+        cursor.execute("SELECT user_name, COUNT(*) FROM requests GROUP BY user_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_user_distribution_requests', 'User distribution by requests', labels=['user'])
+        for user, count in results:
+            metric.add_metric([user], count)
+        yield metric
+        
+        # User distribution by tokens
+        cursor.execute("SELECT user_name, COALESCE(SUM(tokens_used), 0) FROM requests GROUP BY user_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_user_distribution_tokens', 'User distribution by tokens', labels=['user'])
+        for user, tokens in results:
+            metric.add_metric([user], tokens)
+        yield metric
+        
+        # Model distribution by requests
+        cursor.execute("SELECT model_name, COUNT(*) FROM requests GROUP BY model_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_model_distribution_requests', 'Model distribution by requests', labels=['model'])
+        for model, count in results:
+            metric.add_metric([model], count)
+        yield metric
+        
+        # Model distribution by tokens
+        cursor.execute("SELECT model_name, COALESCE(SUM(tokens_used), 0) FROM requests GROUP BY model_name")
+        results = cursor.fetchall()
+        metric = GaugeMetricFamily('llm_model_distribution_tokens', 'Model distribution by tokens', labels=['model'])
+        for model, tokens in results:
+            metric.add_metric([model], tokens)
+        yield metric
 
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser(description='SQLite Prometheus Exporter')
+    parser = argparse.ArgumentParser(description='SQLite Prometheus Exporter for LLM Analytics')
     parser.add_argument('--db-path', default='/data/requests.db', help='Path to SQLite database')
     parser.add_argument('--port', type=int, default=8001, help='Port to serve metrics on')
-    parser.add_argument('--interval', type=int, default=30, help='Scrape interval in seconds')
     
     args = parser.parse_args()
     
@@ -218,7 +217,6 @@ def main():
     print(f"Database path: {args.db_path}")
     print("Metrics available at http://localhost:8001/metrics")
     
-    # Keep the server running
     try:
         while True:
             time.sleep(60)

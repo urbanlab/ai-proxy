@@ -1,34 +1,35 @@
-from fastapi import FastAPI, HTTPException, Depends, Security, status,File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, Security, status, File, UploadFile, Form
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from codecarbon import OfflineEmissionsTracker
 import tempfile
 import io
+import time
+import json
+import yaml
+import os
 from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest
+from lib.utils import estimate_tokens, extract_tokens_from_response
 from typing import Optional, List, Dict, Any, AsyncGenerator
 import aiohttp
-import json
-import time
-import yaml
 import lib.db
-import os
 
 app = FastAPI(
-   title="LLM Proxy API",
-   description="Proxy API for Large Language Models with authentication and rate limiting",
-   version="1.0.0",
-   docs_url="/docs",
-   redoc_url="/redoc"
+    title="LLM Proxy API",
+    description="Proxy API for Large Language Models with authentication and rate limiting",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
 # CORS middleware
 app.add_middleware(
-   CORSMiddleware,
-   allow_origins=["*"],
-   allow_credentials=True,
-   allow_methods=["*"],
-   allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Security
@@ -36,39 +37,39 @@ security = HTTPBearer()
 
 # Load configuration
 with open("/config.yaml", "r") as f:
-   CONFIG = yaml.safe_load(f)
+    CONFIG = yaml.safe_load(f)
 
 def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any]:
-   if model_name not in user_key['models']:
-       raise HTTPException(
-           status_code=status.HTTP_403_FORBIDDEN,
-           detail="Access to the model is forbidden for this user",
-       )
-   for model in CONFIG['model_list']:
-       if model['model_name'] == model_name:
-           return model  # Return the complete model config, not just params
-   raise HTTPException(
-       status_code=status.HTTP_404_NOT_FOUND,
-       detail="Model not found",
-   )
+    if model_name not in user_key['models']:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access to the model is forbidden for this user",
+        )
+    for model in CONFIG['model_list']:
+        if model['model_name'] == model_name:
+            return model  # Return the complete model config, not just params
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Model not found",
+    )
 
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-   token = credentials.credentials
-   for key in CONFIG['keys']:
-       if key['token'] == token:
-           return key
-   raise HTTPException(
-       status_code=status.HTTP_401_UNAUTHORIZED,
-       detail="Invalid or missing token or insufficient permissions",
-       headers={"WWW-Authenticate": "Bearer"},
-   )
+    token = credentials.credentials
+    for key in CONFIG['keys']:
+        if key['token'] == token:
+            return key
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing token or insufficient permissions",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 def get_user_from_token(token: str) -> Optional[str]:
-   for key in CONFIG['keys']:
-       if key['token'] == token:
-           return key['name']
-   return None
+    for key in CONFIG['keys']:
+        if key['token'] == token:
+            return key['name']
+    return None
 
 # Add this function after your other fetch functions
 async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> bytes:
@@ -130,46 +131,46 @@ async def fetch_transcription(model_config: Dict[str, Any], file_path: str, requ
 
 # fetch chat completion from the model API streaming depends on verify_token
 async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
-   url = f"{model_config['params']['api_base']}/chat/completions"
-   headers = {
-       "Content-Type": "application/json",
-   }
-   if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
-       headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    url = f"{model_config['params']['api_base']}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
 
-   print(f"Making request to: {url}")  # Debug log
-   print(f"Request data: {request_data}")  # Debug log
-   
-   async with aiohttp.ClientSession() as session:
-       async with session.post(url, headers=headers, json=request_data) as resp:
-           if resp.status != 200:
-               text = await resp.text()
-               print(f"Error response: {text}")  # Debug log
-               raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
-           
-           print(f"Response status: {resp.status}")  # Debug log
-           print(f"Response headers: {dict(resp.headers)}")  # Debug log
-           
-           async for line in resp.content:
-               decoded_line = line.decode('utf-8')
-               if decoded_line.strip():
-                   yield decoded_line
+    print(f"Making request to: {url}")  # Debug log
+    print(f"Request data: {request_data}")  # Debug log
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=request_data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                print(f"Error response: {text}")  # Debug log
+                raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+            
+            print(f"Response status: {resp.status}")  # Debug log
+            print(f"Response headers: {dict(resp.headers)}")  # Debug log
+            
+            async for line in resp.content:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.strip():
+                    yield decoded_line
 
 # fetch chat completion from the model API non-streaming
 async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
-   url = f"{model_config['params']['api_base']}/chat/completions"
-   headers = {
-       "Content-Type": "application/json",
-   }
-   if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
-       headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    url = f"{model_config['params']['api_base']}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
 
-   async with aiohttp.ClientSession() as session:
-       async with session.post(url, headers=headers, json=request_data) as resp:
-           if resp.status != 200:
-               text = await resp.text()
-               raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
-           return await resp.json()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=request_data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+            return await resp.json()
 
 # Add this new function after your existing fetch functions
 async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -190,79 +191,144 @@ async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str,
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
-   model_config = get_model_config(request.model, user_key)
-   request_data = request.dict(by_alias=True)
-   
-   # FIX: Use the actual model name from config
-   request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
-   
-   if model_config['params'].get('drop_params'):
-       # keep only model, messages, and stream
-       request_data = {
-           "model": request_data["model"],
-           "messages": request_data["messages"],
-           "stream": request_data.get("stream", False)  # Keep the stream parameter!
-       }
-   if model_config['params'].get('max_input_tokens'):
-       # truncate messages to fit max_input_tokens
-       total_tokens = sum(len(msg['content'].split()) for msg in request_data['messages'])
-       while total_tokens > model_config['params']['max_input_tokens'] and len(request_data['messages']) > 1:
-           removed_msg = request_data['messages'].pop(0)
-           total_tokens -= len(removed_msg['content'].split())
-   
-   # start time for CO2 calculation
-   tracker = OfflineEmissionsTracker(country_iso_code="FRA")
-   tracker.start()
-   
-   if request.stream:
-       # streaming response
-       async def event_generator():
-           try:
-               async for chunk in fetch_chat_completion_stream(model_config, request_data):
-                   yield chunk
-           except Exception as e:
-               # Yield error in SSE format
-               error_data = {
-                   "error": {
-                       "message": str(e),
-                       "type": "stream_error"
-                   }
-               }
-               yield f"data: {json.dumps(error_data)}\n\n"
-           finally:
-               # Send the final [DONE] message
-               yield "data: [DONE]\n\n"
-               
-               # Log the request
-               lib.db.create_request(
-                   user_name=get_user_from_token(user_key['token']),
-                   model_name=request.model,
-                   prompt=json.dumps([msg.dict() for msg in request.messages]),
-                   response="streamed_response",
-                   co2=tracker.stop()
-               )
-       
-       return StreamingResponse(
-           event_generator(),
-           media_type="text/event-stream",
-           headers={
-               "Cache-Control": "no-cache",
-               "Connection": "keep-alive",
-               "X-Accel-Buffering": "no"  # Disable nginx buffering if applicable
-           }
-       )
-   else:
-       # non-streaming response
-       response_data = await fetch_chat_completion(model_config, request_data)
-       # log the request in the database
-       lib.db.create_request(
-           user_name=get_user_from_token(user_key['token']),
-           model_name=request.model,
-           prompt=json.dumps([msg.dict() for msg in request.messages]),
-           response=json.dumps(response_data),
-           co2=tracker.stop()
-       )
-       return response_data
+    model_config = get_model_config(request.model, user_key)
+    request_data = request.dict(by_alias=True)
+    
+    # FIX: Use the actual model name from config
+    request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
+    
+    if model_config['params'].get('drop_params'):
+        # keep only model, messages, and stream
+        request_data = {
+            "model": request_data["model"],
+            "messages": request_data["messages"],
+            "stream": request_data.get("stream", False)  # Keep the stream parameter!
+        }
+    if model_config['params'].get('max_input_tokens'):
+        # truncate messages to fit max_input_tokens
+        total_tokens = sum(len(msg['content'].split()) for msg in request_data['messages'])
+        while total_tokens > model_config['params']['max_input_tokens'] and len(request_data['messages']) > 1:
+            removed_msg = request_data['messages'].pop(0)
+            total_tokens -= len(removed_msg['content'].split())
+    
+    # Start timing and CO2 tracking
+    start_time = time.time()
+    tracker = OfflineEmissionsTracker(country_iso_code="FRA")
+    tracker.start()
+    
+    # Estimate input tokens
+    input_text = " ".join([msg['content'] for msg in request_data['messages']])
+    estimated_input_tokens = estimate_tokens(input_text)
+    
+    if request.stream:
+        # streaming response
+        collected_response = ""
+        collected_chunks = []  # Store all chunks for logging
+        
+        async def event_generator():
+            nonlocal collected_response, collected_chunks
+            try:
+                async for chunk in fetch_chat_completion_stream(model_config, request_data):
+                    # Store the raw chunk
+                    collected_chunks.append(chunk)
+                    
+                    # Try to extract content from streaming chunks
+                    if chunk.startswith("data: ") and not chunk.strip().endswith("[DONE]"):
+                        try:
+                            chunk_data = json.loads(chunk[6:])  # Remove "data: " prefix
+                            if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
+                                delta = chunk_data['choices'][0].get('delta', {})
+                                if 'content' in delta:
+                                    collected_response += delta['content']
+                        except json.JSONDecodeError:
+                            pass
+                        except Exception:
+                            pass
+                    yield chunk
+            except Exception as e:
+                # Yield error in SSE format
+                error_data = {
+                    "error": {
+                        "message": str(e),
+                        "type": "stream_error"
+                    }
+                }
+                yield f"data: {json.dumps(error_data)}\n\n"
+            finally:
+                # Send the final [DONE] message
+                yield "data: [DONE]\n\n"
+                
+                # Calculate metrics
+                response_time = time.time() - start_time
+                output_tokens = estimate_tokens(collected_response) if collected_response else 0
+                total_tokens = estimated_input_tokens + output_tokens
+                
+                # Create a structured response for logging
+                if collected_response:
+                    # Store the actual collected content
+                    structured_response = {
+                        "content": collected_response,
+                        "streaming": True,
+                        "chunks_count": len(collected_chunks),
+                        "response_time": response_time
+                    }
+                    response_for_db = json.dumps(structured_response)
+                else:
+                    # Fallback: store raw chunks if no content was extracted
+                    response_for_db = json.dumps({
+                        "raw_chunks": collected_chunks[:10],  # Limit to first 10 chunks to avoid huge logs
+                        "streaming": True,
+                        "chunks_count": len(collected_chunks),
+                        "response_time": response_time,
+                        "note": "Content extraction failed, storing raw chunks"
+                    })
+                
+                # Log the request
+                lib.db.create_request(
+                    user_name=get_user_from_token(user_key['token']),
+                    model_name=request.model,
+                    prompt=json.dumps([msg.dict() for msg in request.messages]),
+                    response=response_for_db,  # Store actual collected content
+                    co2=tracker.stop(),
+                    tokens_used=total_tokens,
+                    response_latency=response_time
+                )
+        
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"  # Disable nginx buffering if applicable
+            }
+        )
+    else:
+        # non-streaming response
+        response_data = await fetch_chat_completion(model_config, request_data)
+        response_time = time.time() - start_time
+        
+        # Extract tokens from response or estimate
+        total_tokens = extract_tokens_from_response(response_data)
+        if total_tokens == 0:
+            # Estimate if not provided by API
+            response_text = ""
+            if 'choices' in response_data:
+                response_text = " ".join([choice.get('message', {}).get('content', '') for choice in response_data['choices']])
+            output_tokens = estimate_tokens(response_text)
+            total_tokens = estimated_input_tokens + output_tokens
+        
+        # log the request in the database
+        lib.db.create_request(
+            user_name=get_user_from_token(user_key['token']),
+            model_name=request.model,
+            prompt=json.dumps([msg.dict() for msg in request.messages]),
+            response=json.dumps(response_data),
+            co2=tracker.stop(),
+            tokens_used=total_tokens,
+            response_latency=response_time
+        )
+        return response_data
 
 # /embeddings endpoint
 @app.post("/v1/embeddings")
@@ -285,11 +351,24 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
             removed_text = request_data['input'].pop(0)
             total_tokens -= len(removed_text.split())
     
-    # start time for CO2 calculation
+    # Start timing and CO2 tracking
+    start_time = time.time()
     tracker = OfflineEmissionsTracker(country_iso_code="FRA")
     tracker.start()
     
+    # Estimate input tokens
+    input_text = " ".join(request.input if isinstance(request.input, list) else [request.input])
+    estimated_tokens = estimate_tokens(input_text)
+    
     response_data = await fetch_embeddings(model_config, request_data)
+    
+    # Calculate response time
+    response_time = time.time() - start_time
+    
+    # Extract tokens from response if available, otherwise use estimate
+    total_tokens = extract_tokens_from_response(response_data)
+    if total_tokens == 0:
+        total_tokens = estimated_tokens
     
     # log the request in the database
     lib.db.create_request(
@@ -297,7 +376,9 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
         model_name=request.model,
         prompt=json.dumps(request.input),
         response=json.dumps(response_data),
-        co2=tracker.stop()
+        co2=tracker.stop(),
+        tokens_used=total_tokens,
+        response_latency=response_time
     )
     
     return response_data
@@ -355,12 +436,25 @@ async def create_transcription(
         temp_file_path = temp_file.name
     
     try:
-        # Start CO2 tracking
+        # Start timing and CO2 tracking
+        start_time = time.time()
         tracker = OfflineEmissionsTracker(country_iso_code="FRA")
         tracker.start()
         
         # Make the transcription request
         response_data = await fetch_transcription(model_config, temp_file_path, request_data)
+        
+        # Calculate response time
+        response_time = time.time() - start_time
+        
+        # Estimate tokens based on transcription output
+        transcription_text = ""
+        if isinstance(response_data, dict):
+            transcription_text = response_data.get('text', '')
+        elif isinstance(response_data, str):
+            transcription_text = response_data
+        
+        estimated_tokens = estimate_tokens(transcription_text) if transcription_text else 0
         
         # Log the request in the database
         lib.db.create_request(
@@ -368,7 +462,9 @@ async def create_transcription(
             model_name=model,
             prompt=f"Audio transcription: {file.filename}",
             response=json.dumps(response_data),
-            co2=tracker.stop()
+            co2=tracker.stop(),
+            tokens_used=estimated_tokens,
+            response_latency=response_time
         )
         
         return response_data
@@ -416,13 +512,20 @@ async def create_speech(
             "voice": request_data.get("voice", "fr_FR-upmc-medium")  # Keep voice parameter
         }
     
-    # Start CO2 tracking
+    # Start timing and CO2 tracking
+    start_time = time.time()
     tracker = OfflineEmissionsTracker(country_iso_code="FRA")
     tracker.start()
+    
+    # Estimate input tokens
+    estimated_tokens = estimate_tokens(request.input)
     
     try:
         # Make the speech request
         audio_data = await fetch_speech(model_config, request_data)
+        
+        # Calculate response time
+        response_time = time.time() - start_time
         
         # Log the request in the database
         lib.db.create_request(
@@ -430,7 +533,9 @@ async def create_speech(
             model_name=request.model,
             prompt=f"TTS ({request.voice}): {request.input[:100]}{'...' if len(request.input) > 100 else ''}",  # Include voice in log
             response=f"Audio generated ({len(audio_data)} bytes)",
-            co2=tracker.stop()
+            co2=tracker.stop(),
+            tokens_used=estimated_tokens,
+            response_latency=response_time
         )
         
         # Set appropriate content type based on format
@@ -462,21 +567,21 @@ async def create_speech(
 # list models endpoint
 @app.get("/v1/models")
 async def list_models(user_key = Depends(verify_token)):
-   models = []
-   for model in CONFIG['model_list']:
-       if model['model_name'] in user_key['models']:
-           models.append({
-               "id": model['model_name'],
-               "object": "model",
-               "created": int(time.time()),
-               "owned_by": "organization",
-               "permission": [],
-           })
-   return {
-       "object": "list",
-       "data": models
-   }
+    models = []
+    for model in CONFIG['model_list']:
+        if model['model_name'] in user_key['models']:
+            models.append({
+                "id": model['model_name'],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "organization",
+                "permission": [],
+            })
+    return {
+        "object": "list",
+        "data": models
+    }
 
 if __name__ == "__main__":
-   import uvicorn
-   uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
