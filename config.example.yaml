@@ -1,17 +1,13 @@
 global:
-  influxdb:
-    url: http://localhost:8086
-    token: your_token
-    org: your_org
-    bucket: your_bucket
 model_list:
-  - model_name: qwen3
+  - model_name: gemma3
         params:
-          model: qwen3:14b
+          model: gemma3
           api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
           drop_params: true
           api_key: "no_token"
           max_input_tokens: 25000
+          vision: true
      
   - model_name: devstral
     params:

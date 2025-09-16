@@ -9,9 +9,10 @@ import time
 import json
 import yaml
 import os
-from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest
+import base64
+from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.utils import estimate_tokens, extract_tokens_from_response
-from typing import Optional, List, Dict, Any, AsyncGenerator
+from typing import Optional, List, Dict, Any, AsyncGenerator, Union
 import aiohttp
 import lib.db
 
@@ -70,6 +71,77 @@ def get_user_from_token(token: str) -> Optional[str]:
         if key['token'] == token:
             return key['name']
     return None
+
+def validate_vision_request(model_config: Dict[str, Any], messages: List[Message]):
+    """Validate that vision requests are only made to vision-enabled models"""
+    has_images = False
+    
+    for message in messages:
+        if isinstance(message.content, list):
+            for content_item in message.content:
+                if content_item.type == "image_url":
+                    has_images = True
+                    break
+        if has_images:
+            break
+    
+    if has_images and not model_config['params'].get('vision', False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model {model_config['model_name']} does not support vision/image inputs"
+        )
+    
+    return has_images
+
+def validate_image_content(content_item: MessageContent):
+    """Validate image content in messages"""
+    if content_item.type == "image_url" and content_item.image_url:
+        url = content_item.image_url.url
+        
+        # Check if it's a base64 image
+        if url.startswith("data:image/"):
+            try:
+                # Extract base64 data
+                header, data = url.split(",", 1)
+                base64.b64decode(data)
+                return True
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid base64 image data: {str(e)}"
+                )
+        
+        # Check if it's a URL (optional - you might want to disable this for security)
+        elif url.startswith(("http://", "https://")):
+            return True
+        
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Image URL must be either a base64 data URL or HTTP(S) URL"
+            )
+    
+    return False
+
+def estimate_tokens_with_vision(messages: List[Message]) -> int:
+    """Estimate tokens for messages that may contain images"""
+    total_tokens = 0
+    
+    for message in messages:
+        if isinstance(message.content, str):
+            # Simple text message
+            total_tokens += estimate_tokens(message.content)
+        elif isinstance(message.content, list):
+            # Multimodal message
+            for content_item in message.content:
+                if content_item.type == "text" and content_item.text:
+                    total_tokens += estimate_tokens(content_item.text)
+                elif content_item.type == "image_url":
+                    # Images typically cost more tokens - this is a rough estimate
+                    # Different models have different token costs for images
+                    total_tokens += 1000  # Approximate - adjust based on your models
+    
+    return total_tokens
 
 # Add this function after your other fetch functions
 async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> bytes:
@@ -137,7 +209,6 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
     }
     if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
         headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
-
     print(f"Making request to: {url}")  # Debug log
     print(f"Request data: {request_data}")  # Debug log
     
@@ -164,7 +235,6 @@ async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict
     }
     if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
         headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
-
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=request_data) as resp:
             if resp.status != 200:
@@ -192,33 +262,61 @@ async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str,
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
     model_config = get_model_config(request.model, user_key)
+    
+    # Validate vision support
+    has_images = validate_vision_request(model_config, request.messages)
+    
+    # Validate image content if present
+    if has_images:
+        for message in request.messages:
+            if isinstance(message.content, list):
+                for content_item in message.content:
+                    if content_item.type == "image_url":
+                        validate_image_content(content_item)
+    
     request_data = request.dict(by_alias=True)
     
     # FIX: Use the actual model name from config
     request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
     
     if model_config['params'].get('drop_params'):
-        # keep only model, messages, and stream
-        request_data = {
-            "model": request_data["model"],
-            "messages": request_data["messages"],
-            "stream": request_data.get("stream", False)  # Keep the stream parameter!
-        }
-    if model_config['params'].get('max_input_tokens'):
-        # truncate messages to fit max_input_tokens
-        total_tokens = sum(len(msg['content'].split()) for msg in request_data['messages'])
+        # For vision models, keep more parameters
+        if has_images:
+            request_data = {
+                "model": request_data["model"],
+                "messages": request_data["messages"],
+                "stream": request_data.get("stream", False),
+                "max_tokens": request_data.get("max_tokens"),
+                "temperature": request_data.get("temperature")
+            }
+        else:
+            # Regular text-only request
+            request_data = {
+                "model": request_data["model"],
+                "messages": request_data["messages"],
+                "stream": request_data.get("stream", False)
+            }
+    
+    # Handle max_input_tokens for vision models differently
+    if model_config['params'].get('max_input_tokens') and not has_images:
+        # Only truncate text-only messages
+        total_tokens = 0
+        for msg in request_data['messages']:
+            if isinstance(msg.get('content'), str):
+                total_tokens += len(msg['content'].split())
+        
         while total_tokens > model_config['params']['max_input_tokens'] and len(request_data['messages']) > 1:
             removed_msg = request_data['messages'].pop(0)
-            total_tokens -= len(removed_msg['content'].split())
+            if isinstance(removed_msg.get('content'), str):
+                total_tokens -= len(removed_msg['content'].split())
     
     # Start timing and CO2 tracking
     start_time = time.time()
     tracker = OfflineEmissionsTracker(country_iso_code="FRA")
     tracker.start()
     
-    # Estimate input tokens
-    input_text = " ".join([msg['content'] for msg in request_data['messages']])
-    estimated_input_tokens = estimate_tokens(input_text)
+    # Estimate input tokens with vision support
+    estimated_input_tokens = estimate_tokens_with_vision(request.messages)
     
     if request.stream:
         # streaming response
@@ -270,7 +368,8 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         "content": collected_response,
                         "streaming": True,
                         "chunks_count": len(collected_chunks),
-                        "response_time": response_time
+                        "response_time": response_time,
+                        "has_vision": has_images
                     }
                     response_for_db = json.dumps(structured_response)
                 else:
@@ -280,15 +379,31 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         "streaming": True,
                         "chunks_count": len(collected_chunks),
                         "response_time": response_time,
+                        "has_vision": has_images,
                         "note": "Content extraction failed, storing raw chunks"
                     })
+                
+                # Prepare messages for logging
+                messages_for_log = []
+                for msg in request.messages:
+                    if isinstance(msg.content, str):
+                        messages_for_log.append({"role": msg.role, "content": msg.content})
+                    else:
+                        # For vision messages, create a summary
+                        content_summary = []
+                        for item in msg.content:
+                            if item.type == "text":
+                                content_summary.append({"type": "text", "text": item.text})
+                            elif item.type == "image_url":
+                                content_summary.append({"type": "image_url", "summary": "Image provided"})
+                        messages_for_log.append({"role": msg.role, "content": content_summary})
                 
                 # Log the request
                 lib.db.create_request(
                     user_name=get_user_from_token(user_key['token']),
                     model_name=request.model,
-                    prompt=json.dumps([msg.dict() for msg in request.messages]),
-                    response=response_for_db,  # Store actual collected content
+                    prompt=json.dumps(messages_for_log),
+                    response=response_for_db,
                     co2=tracker.stop(),
                     tokens_used=total_tokens,
                     response_latency=response_time
@@ -318,11 +433,26 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             output_tokens = estimate_tokens(response_text)
             total_tokens = estimated_input_tokens + output_tokens
         
+        # Prepare messages for logging
+        messages_for_log = []
+        for msg in request.messages:
+            if isinstance(msg.content, str):
+                messages_for_log.append({"role": msg.role, "content": msg.content})
+            else:
+                # For vision messages, create a summary
+                content_summary = []
+                for item in msg.content:
+                    if item.type == "text":
+                        content_summary.append({"type": "text", "text": item.text})
+                    elif item.type == "image_url":
+                        content_summary.append({"type": "image_url", "summary": "Image provided"})
+                messages_for_log.append({"role": msg.role, "content": content_summary})
+        
         # log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
             model_name=request.model,
-            prompt=json.dumps([msg.dict() for msg in request.messages]),
+            prompt=json.dumps(messages_for_log),
             response=json.dumps(response_data),
             co2=tracker.stop(),
             tokens_used=total_tokens,
@@ -570,13 +700,22 @@ async def list_models(user_key = Depends(verify_token)):
     models = []
     for model in CONFIG['model_list']:
         if model['model_name'] in user_key['models']:
-            models.append({
+            model_info = {
                 "id": model['model_name'],
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "organization",
                 "permission": [],
-            })
+            }
+            
+            # Add vision capability information
+            if model['params'].get('vision', False):
+                model_info["capabilities"] = ["text", "vision"]
+            else:
+                model_info["capabilities"] = ["text"]
+                
+            models.append(model_info)
+    
     return {
         "object": "list",
         "data": models

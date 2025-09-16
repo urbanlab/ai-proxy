@@ -17,3 +17,5 @@ def extract_tokens_from_response(response_data: dict) -> int:
     if isinstance(response_data, dict) and 'usage' in response_data:
         return response_data['usage'].get('total_tokens', 0)
     return 0
+
+
