@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException, Depends, Security, status, File, Upl
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from codecarbon import OfflineEmissionsTracker
 import tempfile
 import io
 import time
@@ -12,10 +11,9 @@ import os
 import base64
 from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.utils import estimate_tokens, extract_tokens_from_response
-from typing import Optional, List, Dict, Any, AsyncGenerator, Union
+from typing import Optional, List, Dict, Any, AsyncGenerator
 import aiohttp
 import lib.db
-
 app = FastAPI(
     title="LLM Proxy API",
     description="Proxy API for Large Language Models with authentication and rate limiting",
@@ -23,7 +21,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
-
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -32,14 +29,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Security
 security = HTTPBearer()
-
 # Load configuration
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
-
 def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any]:
     if model_name not in user_key['models']:
         raise HTTPException(
@@ -53,7 +47,6 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Model not found",
     )
-
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -65,13 +58,11 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
         detail="Invalid or missing token or insufficient permissions",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
 def get_user_from_token(token: str) -> Optional[str]:
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key['name']
     return None
-
 def validate_vision_request(model_config: Dict[str, Any], messages: List[Message]):
     """Validate that vision requests are only made to vision-enabled models"""
     has_images = False
@@ -92,7 +83,6 @@ def validate_vision_request(model_config: Dict[str, Any], messages: List[Message
         )
     
     return has_images
-
 def validate_image_content(content_item: MessageContent):
     """Validate image content in messages"""
     if content_item.type == "image_url" and content_item.image_url:
@@ -122,7 +112,6 @@ def validate_image_content(content_item: MessageContent):
             )
     
     return False
-
 def estimate_tokens_with_vision(messages: List[Message]) -> int:
     """Estimate tokens for messages that may contain images"""
     total_tokens = 0
@@ -142,7 +131,6 @@ def estimate_tokens_with_vision(messages: List[Message]) -> int:
                     total_tokens += 1000  # Approximate - adjust based on your models
     
     return total_tokens
-
 # Add this function after your other fetch functions
 async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> bytes:
     url = f"{model_config['params']['api_base']}/audio/speech"
@@ -154,7 +142,6 @@ async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any
         headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
     
     print(f"Making speech request to: {url}")  # Debug log
-    print(f"Request data: {request_data}")  # Debug log
     
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=request_data) as resp:
@@ -168,7 +155,6 @@ async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any
             
             # Return the audio bytes
             return await resp.read()
-
 # Add this function after your other fetch functions
 async def fetch_transcription(model_config: Dict[str, Any], file_path: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/audio/transcriptions"
@@ -200,7 +186,6 @@ async def fetch_transcription(model_config: Dict[str, Any], file_path: str, requ
                     return {"text": await resp.text()}
                 else:
                     return await resp.json()
-
 # fetch chat completion from the model API streaming depends on verify_token
 async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
     url = f"{model_config['params']['api_base']}/chat/completions"
@@ -210,7 +195,6 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
     if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
         headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
     print(f"Making request to: {url}")  # Debug log
-    print(f"Request data: {request_data}")  # Debug log
     
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=request_data) as resp:
@@ -226,7 +210,6 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
                 decoded_line = line.decode('utf-8')
                 if decoded_line.strip():
                     yield decoded_line
-
 # fetch chat completion from the model API non-streaming
 async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/chat/completions"
@@ -241,7 +224,6 @@ async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict
                 text = await resp.text()
                 raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
             return await resp.json()
-
 # Add this new function after your existing fetch functions
 async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/embeddings"  # Note: /embeddings not /chat/completions
@@ -257,7 +239,6 @@ async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str,
                 text = await resp.text()
                 raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
             return await resp.json()
-
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
@@ -310,10 +291,8 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             if isinstance(removed_msg.get('content'), str):
                 total_tokens -= len(removed_msg['content'].split())
     
-    # Start timing and CO2 tracking
+    # Start timing
     start_time = time.time()
-    tracker = OfflineEmissionsTracker(country_iso_code="FRA")
-    tracker.start()
     
     # Estimate input tokens with vision support
     estimated_input_tokens = estimate_tokens_with_vision(request.messages)
@@ -404,7 +383,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                     model_name=request.model,
                     prompt=json.dumps(messages_for_log),
                     response=response_for_db,
-                    co2=tracker.stop(),
+                    co2=0,  # No CO2 tracking
                     tokens_used=total_tokens,
                     response_latency=response_time
                 )
@@ -454,12 +433,11 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             model_name=request.model,
             prompt=json.dumps(messages_for_log),
             response=json.dumps(response_data),
-            co2=tracker.stop(),
+            co2=0,  # No CO2 tracking
             tokens_used=total_tokens,
             response_latency=response_time
         )
         return response_data
-
 # /embeddings endpoint
 @app.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_token)):
@@ -481,10 +459,8 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
             removed_text = request_data['input'].pop(0)
             total_tokens -= len(removed_text.split())
     
-    # Start timing and CO2 tracking
+    # Start timing
     start_time = time.time()
-    tracker = OfflineEmissionsTracker(country_iso_code="FRA")
-    tracker.start()
     
     # Estimate input tokens
     input_text = " ".join(request.input if isinstance(request.input, list) else [request.input])
@@ -506,13 +482,12 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
         model_name=request.model,
         prompt=json.dumps(request.input),
         response=json.dumps(response_data),
-        co2=tracker.stop(),
+        co2=0,  # No CO2 tracking
         tokens_used=total_tokens,
         response_latency=response_time
     )
     
     return response_data
-
 # /audio/transcriptions endpoint
 @app.post("/v1/audio/transcriptions")
 async def create_transcription(
@@ -566,10 +541,8 @@ async def create_transcription(
         temp_file_path = temp_file.name
     
     try:
-        # Start timing and CO2 tracking
+        # Start timing
         start_time = time.time()
-        tracker = OfflineEmissionsTracker(country_iso_code="FRA")
-        tracker.start()
         
         # Make the transcription request
         response_data = await fetch_transcription(model_config, temp_file_path, request_data)
@@ -592,7 +565,7 @@ async def create_transcription(
             model_name=model,
             prompt=f"Audio transcription: {file.filename}",
             response=json.dumps(response_data),
-            co2=tracker.stop(),
+            co2=0,  # No CO2 tracking
             tokens_used=estimated_tokens,
             response_latency=response_time
         )
@@ -603,7 +576,6 @@ async def create_transcription(
         # Clean up temporary file
         if os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
-
 # /audio/speech endpoint
 @app.post("/v1/audio/speech")
 async def create_speech(
@@ -642,10 +614,8 @@ async def create_speech(
             "voice": request_data.get("voice", "fr_FR-upmc-medium")  # Keep voice parameter
         }
     
-    # Start timing and CO2 tracking
+    # Start timing
     start_time = time.time()
-    tracker = OfflineEmissionsTracker(country_iso_code="FRA")
-    tracker.start()
     
     # Estimate input tokens
     estimated_tokens = estimate_tokens(request.input)
@@ -663,7 +633,7 @@ async def create_speech(
             model_name=request.model,
             prompt=f"TTS ({request.voice}): {request.input[:100]}{'...' if len(request.input) > 100 else ''}",  # Include voice in log
             response=f"Audio generated ({len(audio_data)} bytes)",
-            co2=tracker.stop(),
+            co2=0,  # No CO2 tracking
             tokens_used=estimated_tokens,
             response_latency=response_time
         )
@@ -691,9 +661,7 @@ async def create_speech(
         )
         
     except Exception as e:
-        tracker.stop()  # Stop tracker in case of error
         raise e
-
 # list models endpoint
 @app.get("/v1/models")
 async def list_models(user_key = Depends(verify_token)):
@@ -720,7 +688,6 @@ async def list_models(user_key = Depends(verify_token)):
         "object": "list",
         "data": models
     }
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
