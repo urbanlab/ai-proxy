@@ -1,0 +1,132 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-proxy-config
+data:
+  config.yaml: |
+    global:
+    model_list:
+      - model_name: gemma3
+        params:
+          model: gemma3
+          api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
+          drop_params: true
+          api_key: "no_token"
+          max_input_tokens: 25000
+          vision: true
+         
+      - model_name: devstral
+        params:
+          model: devstral:latest
+          api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
+          drop_params: true
+          api_key: "no_token"
+          max_input_tokens: 25000
+    keys:
+      - name: "user"
+        token: "token"
+        models:
+          - "qwen3"
+          - "devstral"
+        max_concurrent_requests: 10
+        max_requests_per_minute: 6
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-proxy-deployment
+  
+  labels:
+    app: ai-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-proxy
+  template:
+    metadata:
+      labels:
+        app: ai-proxy
+    spec:
+      containers:
+      - name: api
+        image: erasme/ai-proxy:latest
+        ports:
+        - containerPort: 8000
+          name: api
+        environment:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: config
+          mountPath: /config.yaml
+          subPath: config.yaml
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      - name: prometheus-exporter
+        image: erasme/ai-proxy:latest
+        ports:
+        - containerPort: 8001
+          name: exporter
+        command: ["python", "exporter.py", "--db-path", "/data/requests.db", "--port", "8001"]
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: config
+        configMap:
+          name: ai-proxy-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-proxy-service
+  
+  labels:
+    app: ai-proxy
+spec:
+  selector:
+    app: ai-proxy
+  ports:
+  - name: api
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  - name: exporter
+    port: 8001
+    targetPort: 8001
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-proxy-ingress
+  labels:
+    app: ai-proxy
+  annotations:
+spec:
+  rules:
+  - host: api.your.domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-proxy-service
+            port:
+              number: 8000

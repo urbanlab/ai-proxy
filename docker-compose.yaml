@@ -1,5 +1,6 @@
 services:
   api:
+    image: erasme/ai-proxy:latest
     build:
       context: ./backend
       dockerfile: Dockerfile
