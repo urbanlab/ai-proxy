@@ -4,7 +4,7 @@ model_list:
         params:
           model: gemma3
           api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
-          drop_params: true
+          drop_params: false
           api_key: "no_token"
           max_input_tokens: 25000
           vision: true
@@ -13,7 +13,7 @@ model_list:
     params:
       model: devstral:latest
       api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
-      drop_params: true
+      drop_params: false
       api_key: "no_token"
       max_input_tokens: 25000
 
