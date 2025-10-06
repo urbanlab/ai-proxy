@@ -194,6 +194,7 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
     }
     if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
         headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    
     print(f"Making request to: {url}")  # Debug log
     
     async with aiohttp.ClientSession() as session:
@@ -206,10 +207,18 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
             print(f"Response status: {resp.status}")  # Debug log
             print(f"Response headers: {dict(resp.headers)}")  # Debug log
             
+            # Process line by line, not chunk by chunk
             async for line in resp.content:
-                decoded_line = line.decode('utf-8')
-                if decoded_line.strip():
-                    yield decoded_line
+                line_str = line.decode('utf-8').strip()
+                if line_str:
+                    # If the line doesn't start with "data:", add it
+                    if line_str.startswith('{'):
+                        yield f"data: {line_str}\n\n"
+                    elif line_str == "[DONE]":
+                        yield f"data: [DONE]\n\n"
+                    else:
+                        # Line already properly formatted
+                        yield f"{line_str}\n\n"
 # fetch chat completion from the model API non-streaming
 async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/chat/completions"
