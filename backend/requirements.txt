@@ -7,3 +7,4 @@ codecarbon
 prometheus-client
 python-multipart
 tiktoken
+requests

@@ -1,5 +1,27 @@
 services:
+
+  test:
+    profiles:
+      - test
+    image: erasme/ai-proxy:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-proxy-test
+    depends_on:
+      - api
+    volumes:
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - API_URL=http://api:8000
+      - API_TOKEN=autobot3000
+    command: ["python", "tests.py"]
+
   api:
+    profiles:
+      - api
+      - test
     image: erasme/ai-proxy:latest
     build:
       context: ./backend
@@ -16,6 +38,8 @@ services:
 
     # SQLite Prometheus Exporter
   prometheus-exporter:
+    profiles:
+      - api
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -29,6 +53,8 @@ services:
     command: ["python", "exporter.py", "--db-path", "/data/requests.db", "--port", "8001"]
   
   prometheus:
+    profiles:
+      - api
     image: prom/prometheus:latest
     ports:
       - "9090:9090"
@@ -43,6 +69,8 @@ services:
 
   # Grafana
   grafana:
+    profiles:
+      - api
     image: grafana/grafana:latest
     ports:
       - "4000:3000"
@@ -53,6 +81,8 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning
 
   openwebui:
+    profiles:
+      - api
     image: ghcr.io/open-webui/open-webui:main
     container_name: openwebui
     ports:
