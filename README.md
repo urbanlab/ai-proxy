@@ -68,6 +68,8 @@ exposed metrics:
 - [x] tts routes
 - [ ] streaming tts route
 - [ ] streaming transcript route
+- [ ] load balancer between models
+- [ ] cut tokens before sending to model (based on model max tokens)
 - basic stats (hours/days/weeks/months)
     - [x] models
         - [x] requests per model (line chart)
