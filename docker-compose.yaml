@@ -36,22 +36,6 @@ services:
       - ./backend:/app
       - ./config.yaml:/config.yaml
 
-    # SQLite Prometheus Exporter
-  prometheus-exporter:
-    profiles:
-      - api
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
-    volumes:
-      - ./backend:/app
-      - ./data:/data
-    depends_on:
-      - api
-    command: ["python", "exporter.py", "--db-path", "/data/requests.db", "--port", "8001"]
-  
   prometheus:
     profiles:
       - api

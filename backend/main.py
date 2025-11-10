@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Security, status, File, Upl
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from prometheus_client import make_asgi_app, Counter, Gauge
 import tempfile
 import io
 import time
@@ -14,6 +15,39 @@ from lib.utils import estimate_tokens, extract_tokens_from_response
 from typing import Optional, List, Dict, Any, AsyncGenerator
 import aiohttp
 import lib.db
+
+
+request_by_model_count = Counter(
+    'llm_requests_total',
+    'Total number of requests by model and user',
+    ['model']
+)
+request_by_user_count = Counter(
+    'llm_requests_total_user',
+    'Total number of requests by user',
+    ['user', 'model']
+)
+token_by_request_count = Counter(
+    'llm_tokens_total',
+    'Total number of tokens used by model and user',
+    ['model']
+)
+token_by_user_count = Counter(
+    'llm_tokens_total_user',
+    'Total number of tokens used by user and model',
+    ['user', 'model']
+)
+latency_by_model = Gauge(
+    'llm_request_latency_seconds',
+    'Request latency in seconds by model',
+    ['model']
+)
+latency_by_user = Gauge(
+    'llm_request_latency_seconds_user',
+    'Request latency in seconds by user',
+    ['user']
+)
+
 app = FastAPI(
     title="LLM Proxy API",
     description="Proxy API for Large Language Models with authentication and rate limiting",
@@ -29,6 +63,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+
 # Security
 security = HTTPBearer()
 # Load configuration
@@ -47,6 +85,16 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Model not found",
     )
+
+# prometheus log functions
+def log_metrics(model: str, user: str, tokens: int, latency: float):
+    request_by_model_count.labels(model=model).inc()
+    request_by_user_count.labels(user=user, model=model).inc()
+    token_by_request_count.labels(model=model).inc(tokens)
+    token_by_user_count.labels(user=user, model=model).inc(tokens)
+    latency_by_model.labels(model=model).set(latency)
+    latency_by_user.labels(user=user).set(latency)
+
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -348,7 +396,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 response_time = time.time() - start_time
                 output_tokens = estimate_tokens(collected_response) if collected_response else 0
                 total_tokens = estimated_input_tokens + output_tokens
-                
+                # Log metrics
+                log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
+            
                 # Create a structured response for logging
                 if collected_response:
                     # Store the actual collected content
@@ -436,6 +486,10 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         content_summary.append({"type": "image_url", "summary": "Image provided"})
                 messages_for_log.append({"role": msg.role, "content": content_summary})
         
+        
+         # Log metrics
+        log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
+
         # log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
@@ -484,7 +538,8 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
     total_tokens = extract_tokens_from_response(response_data)
     if total_tokens == 0:
         total_tokens = estimated_tokens
-    
+    # Log metrics
+    log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
     # log the request in the database
     lib.db.create_request(
         user_name=get_user_from_token(user_key['token']),
@@ -567,7 +622,8 @@ async def create_transcription(
             transcription_text = response_data
         
         estimated_tokens = estimate_tokens(transcription_text) if transcription_text else 0
-        
+        # Log metrics
+        log_metrics(model, get_user_from_token(user_key['token']), estimated_tokens, response_time)
         # Log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
@@ -636,6 +692,8 @@ async def create_speech(
         # Calculate response time
         response_time = time.time() - start_time
         
+        # Log metrics
+        log_metrics(request.model, get_user_from_token(user_key['token']), estimated_tokens, response_time)
         # Log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
