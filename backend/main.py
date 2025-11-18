@@ -85,7 +85,62 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Model not found",
     )
-
+async def fetch_image_as_base64(url: str) -> str:
+    """Fetch an image from a URL and convert it to base64 data URL"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.google.com/'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Failed to fetch image from URL: HTTP {resp.status}"
+                    )
+                
+                # Get content type
+                content_type = resp.headers.get('content-type', 'image/jpeg')
+                if not content_type.startswith('image/'):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"URL does not point to an image (content-type: {content_type})"
+                    )
+                
+                # Read image data
+                image_data = await resp.read()
+                
+                # Validate image data is not empty
+                if len(image_data) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Fetched image data is empty"
+                    )
+                
+                # Convert to base64
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                
+                # Return as data URL
+                return f"data:{content_type};base64,{base64_data}"
+    
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch image from URL: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error processing image URL: {str(e)}"
+        )
 # prometheus log functions
 def log_metrics(model: str, user: str, tokens: int, latency: float):
     request_by_model_count.labels(model=model).inc()
@@ -149,7 +204,7 @@ def validate_image_content(content_item: MessageContent):
                     detail=f"Invalid base64 image data: {str(e)}"
                 )
         
-        # Check if it's a URL (optional - you might want to disable this for security)
+        # Allow HTTP(S) URLs without additional validation
         elif url.startswith(("http://", "https://")):
             return True
         
@@ -160,6 +215,7 @@ def validate_image_content(content_item: MessageContent):
             )
     
     return False
+
 def estimate_tokens_with_vision(messages: List[Message]) -> int:
     """Estimate tokens for messages that may contain images"""
     total_tokens = 0
@@ -304,29 +360,39 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
     # Validate vision support
     has_images = validate_vision_request(model_config, request.messages)
     
-    # Validate image content if present
+    # Validate and convert image content if present
     if has_images:
         for message in request.messages:
             if isinstance(message.content, list):
                 for content_item in message.content:
                     if content_item.type == "image_url":
                         validate_image_content(content_item)
+                        
+                        # Convert HTTP(S) URLs to base64 if needed
+                        # Check if backend requires base64 (e.g., Ollama)
+                        if model_config['params'].get('convert_images_to_base64', True):
+                            url = content_item.image_url.url
+                            if url.startswith(("http://", "https://")):
+                                # Fetch and convert to base64
+                                content_item.image_url.url = await fetch_image_as_base64(url)
     
     request_data = request.dict(by_alias=True)
     
-    # FIX: Use the actual model name from config
-    request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
+    # Use the actual model name from config
+    request_data["model"] = model_config['params']['model']
     
     if model_config['params'].get('drop_params'):
-        # For vision models, keep more parameters
+        # For vision models, preserve important parameters
         if has_images:
             request_data = {
                 "model": request_data["model"],
                 "messages": request_data["messages"],
                 "stream": request_data.get("stream", False),
-                "max_tokens": request_data.get("max_tokens"),
+                "max_tokens": request_data.get("max_tokens", 300),
                 "temperature": request_data.get("temperature")
             }
+            # Remove None values
+            request_data = {k: v for k, v in request_data.items() if v is not None}
         else:
             # Regular text-only request
             request_data = {
@@ -335,7 +401,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 "stream": request_data.get("stream", False)
             }
     
-    # Handle max_input_tokens for vision models differently
+    # Don't truncate messages with images
     if model_config['params'].get('max_input_tokens') and not has_images:
         # Only truncate text-only messages
         total_tokens = 0
