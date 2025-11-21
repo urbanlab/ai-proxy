@@ -5,3 +5,4 @@ config.yaml
 emissions.csv
 backend/.~lock.emissions.csv#
 data/
+venv
