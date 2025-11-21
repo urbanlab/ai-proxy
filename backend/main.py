@@ -12,6 +12,7 @@ import os
 import base64
 from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.utils import estimate_tokens, extract_tokens_from_response
+from lib.auth import metrics_auth_middleware
 from typing import Optional, List, Dict, Any, AsyncGenerator
 import aiohttp
 import lib.db
@@ -63,7 +64,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
+app.middleware("http")(metrics_auth_middleware)
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
