@@ -55,5 +55,5 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           push: true
-          context: .
+          context: ./backend
           tags: erasme/ai-proxy:latest , erasme/ai-proxy:${{ steps.version.outputs.new_tag }}

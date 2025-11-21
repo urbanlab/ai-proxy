@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  spip:
+  api:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,5 +29,5 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           push: true
-          context: .
+          context: ./backend
           tags: erasme/ai-proxy:${{ github.ref == 'refs/heads/main' && 'latest' || 'dev' }}
