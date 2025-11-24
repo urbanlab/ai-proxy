@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Security, status, File, Upl
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from prometheus_client import make_asgi_app, Counter, Gauge
 import tempfile
 import io
 import time
@@ -11,9 +12,41 @@ import os
 import base64
 from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.utils import estimate_tokens, extract_tokens_from_response
+from lib.auth import metrics_auth_middleware
 from typing import Optional, List, Dict, Any, AsyncGenerator
 import aiohttp
 import lib.db
+
+request_by_model_count = Counter(
+    'llm_requests_total',
+    'Total number of requests by model and user',
+    ['model']
+)
+request_by_user_count = Counter(
+    'llm_requests_total_user',
+    'Total number of requests by user',
+    ['user', 'model']
+)
+token_by_request_count = Counter(
+    'llm_tokens_total',
+    'Total number of tokens used by model and user',
+    ['model']
+)
+token_by_user_count = Counter(
+    'llm_tokens_total_user',
+    'Total number of tokens used by user and model',
+    ['user', 'model']
+)
+latency_by_model = Gauge(
+    'llm_request_latency_seconds',
+    'Request latency in seconds by model',
+    ['model']
+)
+latency_by_user = Gauge(
+    'llm_request_latency_seconds_user',
+    'Request latency in seconds by user',
+    ['user']
+)
 app = FastAPI(
     title="LLM Proxy API",
     description="Proxy API for Large Language Models with authentication and rate limiting",
@@ -29,11 +62,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.middleware("http")(metrics_auth_middleware)
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 # Security
 security = HTTPBearer()
 # Load configuration
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
+
 def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any]:
     if model_name not in user_key['models']:
         raise HTTPException(
@@ -47,6 +84,73 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         status_code=status.HTTP_404_NOT_FOUND,
         detail="Model not found",
     )
+
+async def fetch_image_as_base64(url: str) -> str:
+    """Fetch an image from a URL and convert it to base64 data URL"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.google.com/'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Failed to fetch image from URL: HTTP {resp.status}"
+                    )
+                
+                # Get content type
+                content_type = resp.headers.get('content-type', 'image/jpeg')
+                if not content_type.startswith('image/'):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"URL does not point to an image (content-type: {content_type})"
+                    )
+                
+                # Read image data
+                image_data = await resp.read()
+                
+                # Validate image data is not empty
+                if len(image_data) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Fetched image data is empty"
+                    )
+                
+                # Convert to base64
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                
+                # Return as data URL
+                return f"data:{content_type};base64,{base64_data}"
+    
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch image from URL: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error processing image URL: {str(e)}"
+        )
+
+# prometheus log functions
+def log_metrics(model: str, user: str, tokens: int, latency: float):
+    request_by_model_count.labels(model=model).inc()
+    request_by_user_count.labels(user=user, model=model).inc()
+    token_by_request_count.labels(model=model).inc(tokens)
+    token_by_user_count.labels(user=user, model=model).inc(tokens)
+    latency_by_model.labels(model=model).set(latency)
+    latency_by_user.labels(user=user).set(latency)
+
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -58,11 +162,13 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
         detail="Invalid or missing token or insufficient permissions",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
 def get_user_from_token(token: str) -> Optional[str]:
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key['name']
     return None
+
 def validate_vision_request(model_config: Dict[str, Any], messages: List[Message]):
     """Validate that vision requests are only made to vision-enabled models"""
     has_images = False
@@ -83,6 +189,7 @@ def validate_vision_request(model_config: Dict[str, Any], messages: List[Message
         )
     
     return has_images
+
 def validate_image_content(content_item: MessageContent):
     """Validate image content in messages"""
     if content_item.type == "image_url" and content_item.image_url:
@@ -101,7 +208,7 @@ def validate_image_content(content_item: MessageContent):
                     detail=f"Invalid base64 image data: {str(e)}"
                 )
         
-        # Check if it's a URL (optional - you might want to disable this for security)
+        # Allow HTTP(S) URLs without additional validation
         elif url.startswith(("http://", "https://")):
             return True
         
@@ -112,6 +219,7 @@ def validate_image_content(content_item: MessageContent):
             )
     
     return False
+
 def estimate_tokens_with_vision(messages: List[Message]) -> int:
     """Estimate tokens for messages that may contain images"""
     total_tokens = 0
@@ -131,6 +239,7 @@ def estimate_tokens_with_vision(messages: List[Message]) -> int:
                     total_tokens += 1000  # Approximate - adjust based on your models
     
     return total_tokens
+
 # Add this function after your other fetch functions
 async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> bytes:
     url = f"{model_config['params']['api_base']}/audio/speech"
@@ -155,6 +264,7 @@ async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any
             
             # Return the audio bytes
             return await resp.read()
+
 # Add this function after your other fetch functions
 async def fetch_transcription(model_config: Dict[str, Any], file_path: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/audio/transcriptions"
@@ -186,6 +296,7 @@ async def fetch_transcription(model_config: Dict[str, Any], file_path: str, requ
                     return {"text": await resp.text()}
                 else:
                     return await resp.json()
+
 # fetch chat completion from the model API streaming depends on verify_token
 async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
     url = f"{model_config['params']['api_base']}/chat/completions"
@@ -219,6 +330,7 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
                     else:
                         # Line already properly formatted
                         yield f"{line_str}\n\n"
+
 # fetch chat completion from the model API non-streaming
 async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/chat/completions"
@@ -233,6 +345,7 @@ async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict
                 text = await resp.text()
                 raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
             return await resp.json()
+
 # Add this new function after your existing fetch functions
 async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{model_config['params']['api_base']}/embeddings"  # Note: /embeddings not /chat/completions
@@ -248,6 +361,7 @@ async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str,
                 text = await resp.text()
                 raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
             return await resp.json()
+
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
@@ -256,38 +370,52 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
     # Validate vision support
     has_images = validate_vision_request(model_config, request.messages)
     
-    # Validate image content if present
+    # Validate and convert image content if present
     if has_images:
         for message in request.messages:
             if isinstance(message.content, list):
                 for content_item in message.content:
                     if content_item.type == "image_url":
                         validate_image_content(content_item)
-    
+                        
+                        # Convert HTTP(S) URLs to base64 for OpenAI
+                        if content_item.image_url.url.startswith(("http://", "https://")):
+                            content_item.image_url.url = await fetch_image_as_base64(content_item.image_url.url)
+
     request_data = request.dict(by_alias=True)
+
+    # Convert to OpenAI format for vision messages
+    if has_images:
+        openai_messages = []
+        for message in request.messages:
+            if isinstance(message.content, list):
+                # Convert to proper OpenAI format
+                openai_content = []
+                for item in message.content:
+                    if item.type == "text":
+                        openai_content.append({"type": "text", "text": item.text})
+                    elif item.type == "image_url":
+                        openai_content.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": item.image_url.url,
+                                "detail": getattr(item.image_url, 'detail', 'auto')
+                            }
+                        })
+                openai_messages.append({"role": message.role, "content": openai_content})
+            else:
+                openai_messages.append({"role": message.role, "content": message.content})
+        request_data["messages"] = openai_messages
     
-    # FIX: Use the actual model name from config
-    request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
+    # Use the actual model name from config
+    request_data["model"] = model_config['params']['model']
     
     if model_config['params'].get('drop_params'):
-        # For vision models, keep more parameters
-        if has_images:
-            request_data = {
-                "model": request_data["model"],
-                "messages": request_data["messages"],
-                "stream": request_data.get("stream", False),
-                "max_tokens": request_data.get("max_tokens"),
-                "temperature": request_data.get("temperature")
-            }
-        else:
-            # Regular text-only request
-            request_data = {
-                "model": request_data["model"],
-                "messages": request_data["messages"],
-                "stream": request_data.get("stream", False)
-            }
+        # Keep OpenAI-compatible parameters only
+        allowed_params = ["model", "messages", "stream", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user"]
+        request_data = {k: v for k, v in request_data.items() if k in allowed_params and v is not None}
     
-    # Handle max_input_tokens for vision models differently
+    # Don't truncate messages with images
     if model_config['params'].get('max_input_tokens') and not has_images:
         # Only truncate text-only messages
         total_tokens = 0
@@ -348,7 +476,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 response_time = time.time() - start_time
                 output_tokens = estimate_tokens(collected_response) if collected_response else 0
                 total_tokens = estimated_input_tokens + output_tokens
-                
+                # Log metrics
+                log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
+            
                 # Create a structured response for logging
                 if collected_response:
                     # Store the actual collected content
@@ -436,6 +566,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         content_summary.append({"type": "image_url", "summary": "Image provided"})
                 messages_for_log.append({"role": msg.role, "content": content_summary})
         
+        
+         # Log metrics
+        log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
         # log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
@@ -447,6 +580,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             response_latency=response_time
         )
         return response_data
+
 # /embeddings endpoint
 @app.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_token)):
@@ -484,7 +618,8 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
     total_tokens = extract_tokens_from_response(response_data)
     if total_tokens == 0:
         total_tokens = estimated_tokens
-    
+    # Log metrics
+    log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
     # log the request in the database
     lib.db.create_request(
         user_name=get_user_from_token(user_key['token']),
@@ -497,6 +632,7 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
     )
     
     return response_data
+
 # /audio/transcriptions endpoint
 @app.post("/v1/audio/transcriptions")
 async def create_transcription(
@@ -567,7 +703,8 @@ async def create_transcription(
             transcription_text = response_data
         
         estimated_tokens = estimate_tokens(transcription_text) if transcription_text else 0
-        
+        # Log metrics
+        log_metrics(model, get_user_from_token(user_key['token']), estimated_tokens, response_time)
         # Log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
@@ -585,6 +722,7 @@ async def create_transcription(
         # Clean up temporary file
         if os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
+
 # /audio/speech endpoint
 @app.post("/v1/audio/speech")
 async def create_speech(
@@ -636,6 +774,8 @@ async def create_speech(
         # Calculate response time
         response_time = time.time() - start_time
         
+        # Log metrics
+        log_metrics(request.model, get_user_from_token(user_key['token']), estimated_tokens, response_time)
         # Log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
@@ -671,6 +811,7 @@ async def create_speech(
         
     except Exception as e:
         raise e
+
 # list models endpoint
 @app.get("/v1/models")
 async def list_models(user_key = Depends(verify_token)):
@@ -697,6 +838,7 @@ async def list_models(user_key = Depends(verify_token)):
         "object": "list",
         "data": models
     }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

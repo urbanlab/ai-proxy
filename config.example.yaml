@@ -1,4 +1,6 @@
-global:
+metrics_auth:
+  username: admin
+  password: your-secure-password
 model_list:
   - model_name: gemma3
         params:
