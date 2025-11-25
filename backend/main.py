@@ -174,6 +174,18 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             if isinstance(removed_msg.get('content'), str):
                 total_tokens -= len(removed_msg['content'].split())
     
+    # Clean up messages to remove None values for Scaleway compatibility
+    if "messages" in request_data:
+        cleaned_messages = []
+        for msg in request_data["messages"]:
+            # Create clean message dict without None values
+            clean_msg = {}
+            for key, value in msg.items():
+                if value is not None:
+                    clean_msg[key] = value
+            cleaned_messages.append(clean_msg)
+        request_data["messages"] = cleaned_messages
+
     # Start timing
     start_time = time.time()
     
