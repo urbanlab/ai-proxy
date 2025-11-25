@@ -1,7 +1,8 @@
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, Security, status, File, UploadFile, Form
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from prometheus_client import make_asgi_app
+from prometheus_client import make_asgi_app, Counter, Gauge
 import tempfile
 import io
 import time
@@ -9,15 +10,43 @@ import json
 import yaml
 import os
 import base64
-from typing import Optional, List, Dict, Any
-import aiohttp
 from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
-from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
-from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64
-from lib.auth import metrics_auth_middleware, verify_token, get_user_from_token
-from lib.metric import log_metrics
+from lib.utils import estimate_tokens, extract_tokens_from_response
+from lib.auth import metrics_auth_middleware
+from typing import Optional, List, Dict, Any, AsyncGenerator
+import aiohttp
 import lib.db
 
+request_by_model_count = Counter(
+    'llm_requests_total',
+    'Total number of requests by model and user',
+    ['model']
+)
+request_by_user_count = Counter(
+    'llm_requests_total_user',
+    'Total number of requests by user',
+    ['user', 'model']
+)
+token_by_request_count = Counter(
+    'llm_tokens_total',
+    'Total number of tokens used by model and user',
+    ['model']
+)
+token_by_user_count = Counter(
+    'llm_tokens_total_user',
+    'Total number of tokens used by user and model',
+    ['user', 'model']
+)
+latency_by_model = Gauge(
+    'llm_request_latency_seconds',
+    'Request latency in seconds by model',
+    ['model']
+)
+latency_by_user = Gauge(
+    'llm_request_latency_seconds_user',
+    'Request latency in seconds by user',
+    ['user']
+)
 app = FastAPI(
     title="LLM Proxy API",
     description="Proxy API for Large Language Models with authentication and rate limiting",
@@ -36,7 +65,8 @@ app.add_middleware(
 app.middleware("http")(metrics_auth_middleware)
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
-
+# Security
+security = HTTPBearer()
 # Load configuration
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
@@ -55,7 +85,89 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
         detail="Model not found",
     )
 
+async def fetch_image_as_base64(url: str) -> str:
+    """Fetch an image from a URL and convert it to base64 data URL"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.google.com/'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Failed to fetch image from URL: HTTP {resp.status}"
+                    )
+                
+                # Get content type
+                content_type = resp.headers.get('content-type', 'image/jpeg')
+                if not content_type.startswith('image/'):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"URL does not point to an image (content-type: {content_type})"
+                    )
+                
+                # Read image data
+                image_data = await resp.read()
+                
+                # Validate image data is not empty
+                if len(image_data) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Fetched image data is empty"
+                    )
+                
+                # Convert to base64
+                base64_data = base64.b64encode(image_data).decode('utf-8')
+                
+                # Return as data URL
+                return f"data:{content_type};base64,{base64_data}"
+    
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch image from URL: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Error processing image URL: {str(e)}"
+        )
 
+# prometheus log functions
+def log_metrics(model: str, user: str, tokens: int, latency: float):
+    request_by_model_count.labels(model=model).inc()
+    request_by_user_count.labels(user=user, model=model).inc()
+    token_by_request_count.labels(model=model).inc(tokens)
+    token_by_user_count.labels(user=user, model=model).inc(tokens)
+    latency_by_model.labels(model=model).set(latency)
+    latency_by_user.labels(user=user).set(latency)
+
+# verify user token and model access
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    token = credentials.credentials
+    for key in CONFIG['keys']:
+        if key['token'] == token:
+            return key
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing token or insufficient permissions",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+def get_user_from_token(token: str) -> Optional[str]:
+    for key in CONFIG['keys']:
+        if key['token'] == token:
+            return key['name']
+    return None
 
 def validate_vision_request(model_config: Dict[str, Any], messages: List[Message]):
     """Validate that vision requests are only made to vision-enabled models"""
@@ -107,6 +219,148 @@ def validate_image_content(content_item: MessageContent):
             )
     
     return False
+
+def estimate_tokens_with_vision(messages: List[Message]) -> int:
+    """Estimate tokens for messages that may contain images"""
+    total_tokens = 0
+    
+    for message in messages:
+        if isinstance(message.content, str):
+            # Simple text message
+            total_tokens += estimate_tokens(message.content)
+        elif isinstance(message.content, list):
+            # Multimodal message
+            for content_item in message.content:
+                if content_item.type == "text" and content_item.text:
+                    total_tokens += estimate_tokens(content_item.text)
+                elif content_item.type == "image_url":
+                    # Images typically cost more tokens - this is a rough estimate
+                    # Different models have different token costs for images
+                    total_tokens += 1000  # Approximate - adjust based on your models
+    
+    return total_tokens
+
+# Add this function after your other fetch functions
+async def fetch_speech(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> bytes:
+    url = f"{model_config['params']['api_base']}/audio/speech"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    
+    print(f"Making speech request to: {url}")  # Debug log
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=request_data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                print(f"Error response: {text}")  # Debug log
+                raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+            
+            print(f"Response status: {resp.status}")  # Debug log
+            print(f"Response content type: {resp.headers.get('content-type')}")  # Debug log
+            
+            # Return the audio bytes
+            return await resp.read()
+
+# Add this function after your other fetch functions
+async def fetch_transcription(model_config: Dict[str, Any], file_path: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{model_config['params']['api_base']}/audio/transcriptions"
+    headers = {}
+    
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    
+    # Prepare form data
+    form_data = aiohttp.FormData()
+    
+    # Add the audio file
+    with open(file_path, 'rb') as f:
+        form_data.add_field('file', f, filename=os.path.basename(file_path), content_type='audio/mpeg')
+        
+        # Add other parameters
+        for key, value in request_data.items():
+            if value is not None:
+                form_data.add_field(key, str(value))
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, data=form_data) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+                
+                # Handle different response formats
+                if request_data.get('response_format') == 'text':
+                    return {"text": await resp.text()}
+                else:
+                    return await resp.json()
+
+# fetch chat completion from the model API streaming depends on verify_token
+async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+    url = f"{model_config['params']['api_base']}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    
+    print(f"Making request to: {url}")  # Debug log
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=request_data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                print(f"Error response: {text}")  # Debug log
+                raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+            
+            print(f"Response status: {resp.status}")  # Debug log
+            print(f"Response headers: {dict(resp.headers)}")  # Debug log
+            
+            # Process line by line, not chunk by chunk
+            async for line in resp.content:
+                line_str = line.decode('utf-8').strip()
+                if line_str:
+                    # If the line doesn't start with "data:", add it
+                    if line_str.startswith('{'):
+                        yield f"data: {line_str}\n\n"
+                    elif line_str == "[DONE]":
+                        yield f"data: [DONE]\n\n"
+                    else:
+                        # Line already properly formatted
+                        yield f"{line_str}\n\n"
+
+# fetch chat completion from the model API non-streaming
+async def fetch_chat_completion(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{model_config['params']['api_base']}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=request_data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+            return await resp.json()
+
+# Add this new function after your existing fetch functions
+async def fetch_embeddings(model_config: Dict[str, Any], request_data: Dict[str, Any]) -> Dict[str, Any]:
+    url = f"{model_config['params']['api_base']}/embeddings"  # Note: /embeddings not /chat/completions
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
+        headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=request_data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+            return await resp.json()
 
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
@@ -174,24 +428,12 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             if isinstance(removed_msg.get('content'), str):
                 total_tokens -= len(removed_msg['content'].split())
     
-    # Clean up messages to remove None values for Scaleway compatibility
-    if "messages" in request_data:
-        cleaned_messages = []
-        for msg in request_data["messages"]:
-            # Create clean message dict without None values
-            clean_msg = {}
-            for key, value in msg.items():
-                if value is not None:
-                    clean_msg[key] = value
-            cleaned_messages.append(clean_msg)
-        request_data["messages"] = cleaned_messages
-
     # Start timing
     start_time = time.time()
     
     # Estimate input tokens with vision support
-    estimated_input_tokens = estimate_tokens(request.messages[0].content if isinstance(request.messages[0].content, str) else "")
-    print(f"Estimated input tokens: {estimated_input_tokens}")  # Debug log
+    estimated_input_tokens = estimate_tokens_with_vision(request.messages)
+    
     if request.stream:
         # streaming response
         collected_response = ""
@@ -308,7 +550,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 response_text = " ".join([choice.get('message', {}).get('content', '') for choice in response_data['choices']])
             output_tokens = estimate_tokens(response_text)
             total_tokens = estimated_input_tokens + output_tokens
-
+        
         # Prepare messages for logging
         messages_for_log = []
         for msg in request.messages:

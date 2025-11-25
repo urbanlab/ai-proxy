@@ -2,9 +2,7 @@ import secrets
 import base64
 import os
 import yaml
-from typing import Optional
-from fastapi import Request, Response, Security, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Request, Response
 
 # In your config.yaml loading section
 with open("/config.yaml", "r") as f:
@@ -14,29 +12,6 @@ with open("/config.yaml", "r") as f:
 METRICS_AUTH = CONFIG.get('metrics_auth', {})
 METRICS_USERNAME = METRICS_AUTH.get('username', 'admin')
 METRICS_PASSWORD = METRICS_AUTH.get('password', 'change-me')
-
-# Security
-security = HTTPBearer()
-
-# verify user token and model access
-def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-    token = credentials.credentials
-    for key in CONFIG['keys']:
-        if key['token'] == token:
-            return key
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or missing token or insufficient permissions",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-
-def get_user_from_token(token: str) -> Optional[str]:
-    for key in CONFIG['keys']:
-        if key['token'] == token:
-            return key['name']
-    return None
-
-
 
 def verify_metrics_auth(credentials: str) -> bool:
     """Verify HTTP Basic Auth credentials for metrics endpoint"""
