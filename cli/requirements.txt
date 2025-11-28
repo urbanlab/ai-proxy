@@ -1,0 +1,6 @@
+typer
+rich
+textual
+typer
+pyyaml
+requests

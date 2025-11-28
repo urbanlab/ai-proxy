@@ -1,6 +1,7 @@
 __pycache__/
 .env
 config.yaml
+cli.yaml
 *.db
 emissions.csv
 backend/.~lock.emissions.csv#

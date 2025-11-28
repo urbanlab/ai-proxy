@@ -67,6 +67,27 @@ exposed metrics:
 - response_tokens
 
 
+## Cli Usage
+
+**Build the CLI image:**
+```bash
+docker build -t ai-proxy-cli ./cli 
+```
+
+**Run as dev with main.py mounted:**
+also mount your config.yaml if you want to use a custom config
+```bash
+docker run --rm -it \
+  -v $(pwd)/cli:/app \
+  -v $(pwd)/config.yaml:/config.yaml \
+  ai-proxy-cli
+```
+
+**Run the CLI container:**
+```bash
+docker run --rm -it ai-proxy-cli 
+```
+
 ## ❤️ Humans.txt
 - aangelot
 - pipazoul
