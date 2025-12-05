@@ -160,7 +160,11 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         # Keep OpenAI-compatible parameters only
         allowed_params = ["model", "messages", "stream", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user"]
         request_data = {k: v for k, v in request_data.items() if k in allowed_params and v is not None}
-    
+        
+        # Some models don't allow both temperature and top_p
+        if 'temperature' in request_data and 'top_p' in request_data:
+            # Remove top_p, keep temperature (or vice versa based on your preference)
+            request_data.pop('top_p')
     # Don't truncate messages with images
     if model_config['params'].get('max_input_tokens') and not has_images:
         # Only truncate text-only messages
