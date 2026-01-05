@@ -8,20 +8,17 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     container_name: ai-proxy-test
-    depends_on:
-      - api
     volumes:
       - ./backend:/app
+      - ./config.yaml:/config.yaml
+    env_file: .env
     environment:
       - PYTHONUNBUFFERED=1
-      - API_URL=http://api:8000
-      - API_TOKEN=autobot3000
-    command: ["python", "tests.py"]
+    command: ["pytest"]
 
   api:
     profiles:
       - api
-      - test
     image: erasme/ai-proxy:latest
     build:
       context: ./backend
