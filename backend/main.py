@@ -128,7 +128,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         if content_item.image_url.url.startswith(("http://", "https://")):
                             content_item.image_url.url = await fetch_image_as_base64(content_item.image_url.url)
 
-    request_data = request.dict(by_alias=True)
+    request_data = request.model_dump(by_alias=True)
 
     # Convert to OpenAI format for vision messages
     if has_images:
@@ -160,7 +160,11 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         # Keep OpenAI-compatible parameters only
         allowed_params = ["model", "messages", "stream", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user"]
         request_data = {k: v for k, v in request_data.items() if k in allowed_params and v is not None}
-    
+        
+        # Some models don't allow both temperature and top_p
+        if 'temperature' in request_data and 'top_p' in request_data:
+            # Remove top_p, keep temperature (or vice versa based on your preference)
+            request_data.pop('top_p')
     # Don't truncate messages with images
     if model_config['params'].get('max_input_tokens') and not has_images:
         # Only truncate text-only messages
@@ -343,7 +347,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
 @app.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_token)):
     model_config = get_model_config(request.model, user_key)
-    request_data = request.dict()
+    request_data = request.model_dump()
     
     request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
     
