@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Union
+from typing import List, Optional, Union
 
 # Add these models after your existing Pydantic models
 class TranscriptionRequest(BaseModel):
@@ -20,7 +20,7 @@ class ImageUrl(BaseModel):
 class MessageContent(BaseModel):
     type: str  # "text" or "image_url"
     text: Optional[str] = None
-    image_url: Optional[ImageUrl] = None
+    image_url: Optional[ImageUrl] = None 
 
 # chat completion request and response models
 class UsageDetails(BaseModel):
@@ -30,14 +30,14 @@ class UsageDetails(BaseModel):
 
 class Usage(BaseModel):
     prompt_tokens: int
-    completion_tokens: int
+    completion_tokens: Optional[int] = None 
     total_tokens: int
     prompt_tokens_details: Optional[UsageDetails] = None
     completion_tokens_details: Optional[UsageDetails] = None
 
 class Message(BaseModel):
     role: str
-    content: Union[str, List[MessageContent]]  # Can be string or list for vision
+    content: Union[str,List[MessageContent]]  # Can be string or list for vision
     name: Optional[str] = None
 
 class ChatCompletionRequest(BaseModel):
@@ -69,7 +69,7 @@ class ChatCompletionResponse(BaseModel):
 # embeddings request and response models
 class EmbeddingInput(BaseModel):
     model: str
-    input: List[str]
+    input: Union[str,List[str]]
     user: Optional[str] = None
 
 class EmbeddingData(BaseModel):

@@ -8,3 +8,5 @@ prometheus-client
 python-multipart
 tiktoken
 requests
+pytest
+httpx

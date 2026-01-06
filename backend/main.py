@@ -128,7 +128,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         if content_item.image_url.url.startswith(("http://", "https://")):
                             content_item.image_url.url = await fetch_image_as_base64(content_item.image_url.url)
 
-    request_data = request.dict(by_alias=True)
+    request_data = request.model_dump(by_alias=True)
 
     # Convert to OpenAI format for vision messages
     if has_images:
@@ -347,7 +347,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
 @app.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_token)):
     model_config = get_model_config(request.model, user_key)
-    request_data = request.dict()
+    request_data = request.model_dump()
     
     request_data["model"] = model_config['params']['model']  # Maps "devstral" to "devstral:24b"
     
