@@ -12,7 +12,6 @@ model_list:
           cost_per_input_token: 0.25
           cost_per_output_token: 0.80
           max_budget: 10
-          budget_duration: 30d # frequency of reset (every x day counting from last update)
           vision: true
      
   - model_name: devstral

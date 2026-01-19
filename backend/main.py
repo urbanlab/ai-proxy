@@ -300,7 +300,10 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                     response=response_for_db,
                     co2=0,  # No CO2 tracking
                     tokens_used=total_tokens,
-                    response_latency=response_time
+                    response_latency=response_time,
+                    input_cost = cost_per_input,
+                    output_cost = cost_per_output
+
                 )
         
         return StreamingResponse(
@@ -348,6 +351,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         output_tokens_nb = estimate_tokens(message_to_string(request.messages))  
         cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
         total_tokens = estimated_input_tokens + output_tokens_nb
+
+        # TODO check model date and compare to reset counter if not same month
+        print("GET MODEL",lib.db.get_model(request.model).last_reset_date)
         log_metrics(
             request.model,
             get_user_from_token(user_key['token']),
@@ -364,7 +370,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             response=json.dumps(response_data),
             co2=0,  # No CO2 tracking
             tokens_used=total_tokens,
-            response_latency=response_time
+            response_latency=response_time,
+            input_cost = cost_per_input,
+            output_cost = cost_per_output
         )
         return response_data
 
