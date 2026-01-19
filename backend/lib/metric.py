@@ -31,12 +31,38 @@ latency_by_user = Gauge(
     ['user']
 )
 
+cost_per_model_input = Counter(
+    "llm_request_input_cost",
+    "Cost per model input tokens",
+    ['model']
+)
 
+cost_per_model_output = Counter(
+    "llm_request_output_cost",
+    "Cost per model output tokens",
+    ['model']
+)
+
+total_cost_per_model = Counter(
+    "llm_request_total_cost",
+    "Total token cost per model",
+    ['model']
+)
 # prometheus log functions
-def log_metrics(model: str, user: str, tokens: int, latency: float):
+def log_metrics(
+        model: str,
+        user: str,
+        tokens: int,
+        latency: float,
+        input_cost: float = 0,
+        output_cost: float =  0
+):
     request_by_model_count.labels(model=model).inc()
     request_by_user_count.labels(user=user, model=model).inc()
     token_by_request_count.labels(model=model).inc(tokens)
     token_by_user_count.labels(user=user, model=model).inc(tokens)
     latency_by_model.labels(model=model).set(latency)
     latency_by_user.labels(user=user).set(latency)
+    cost_per_model_input.labels(model=model).inc(input_cost)
+    cost_per_model_output.labels(model=model).inc(output_cost)
+    total_cost_per_model.labels(model=model).inc(output_cost+input_cost)
