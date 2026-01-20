@@ -30,7 +30,9 @@ cp config.example.yaml config.yaml
 ```
 Edit `config.yaml` to set your OpenAI API key and other configurations.
 ```
-global:
+metrics_auth:
+  username: admin
+  password: your-secure-password
 model_list:
   - model_name: devstral
     params:
@@ -38,9 +40,8 @@ model_list:
       api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
       drop_params: true
       api_key: "no_token"
-      cost_per_token: 0.20 # 0.20€ for ex
-      max_budget: 10 # 10€ for ex 
-      budget_duration: 30d # frequency of reset (every x day counting from last update)
+      cost_per_input_token: 0.25 # Per million token
+      cost_per_output_token: 0.80 # Per million token
       max_input_tokens: 25000
 
 keys:
@@ -49,6 +50,8 @@ keys:
     models:
       - "devstral"
 ```
+
+
 
 **Run the server:**
 
@@ -59,15 +62,43 @@ docker-compose up -d
 The server will be available at `http://localhost:8000`.
 And the docs at `http://localhost:8000/docs`.
 
+**Setup or update Grafana dashboard**
+
+![grafana dashboard](medias/grafana-dashboard.png)
+
+You can import the grafana json dashboard from file `./grafana/provisioning/dashboards/llm-proxy-dashboard.json` 
+
 ## 📈 Monitoring
 The api exposes prometheus metrics for monitoring.
 The prometheus endpoint is available at `http://localhost:8001/metrics`.
 
 exposed metrics:
-- request_count
-- request_latency
-- request_tokens
-- response_tokens
+
+- 'llm_requests_total','Total number of requests by model and user',
+- 'llm_requests_total_user','Total number of requests by user',
+- 'llm_tokens_total','Total number of tokens used by model and user',
+- 'llm_tokens_total_user','Total number of tokens used by user and model',
+- 'llm_request_latency_seconds','Request latency in seconds by model',
+- 'llm_request_latency_seconds_user','Request latency in seconds by user',
+- "llm_request_input_cost_user","Cost per user input tokens",
+- "llm_request_output_cost_user","Cost per user output tokens",
+- "llm_request_total_cost_user","Total Cost per user tokens",
+- "llm_request_input_cost", "Cost per model input tokens",
+- "llm_request_output_cost","Cost per model output tokens",
+- "llm_request_total_cost","Total token cost per model",
+
+
+**Cost monitoring**
+
+For each request the cost per million token is calculated and added on each model and user
+The cost is reset each month in database and in the prometheus gauges
+
+**Database storage**
+
+The database stores the following : 
+- requests : the question and response are saved,the token count and date
+- models: stores the cost for each model 
+- users: stores the cost for each user
 
 
 ## ❤️ Humans.txt
