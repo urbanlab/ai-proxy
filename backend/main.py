@@ -14,10 +14,12 @@ import aiohttp
 from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
 from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
-from lib.auth import metrics_auth_middleware, verify_token, get_user_from_token
+from lib.auth import metrics_auth_middleware, verify_token, get_username_from_token, verify_auth
 from lib.metric import log_metrics
 from lib.cost import calculate_token_cost
 import lib.db
+
+
 
 app = FastAPI(
     title="LLM Proxy API",
@@ -111,7 +113,8 @@ def validate_image_content(content_item: MessageContent):
 
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
+async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_auth)):
+    print("User KEY ?", user_key)
     model_config = get_model_config(request.model, user_key)
     input_tokens_nb = estimate_tokens(message_to_string(request.messages))
     cost_per_input_token = model_config["params"].get("cost_per_input_token", 0)
@@ -248,7 +251,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 # Log metrics
                 log_metrics(
                     request.model,
-                    get_user_from_token(user_key['token']),
+                    get_username_from_token(user_key['token']),
                     total_tokens,
                     response_time,
                     cost_per_input,
@@ -294,7 +297,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 
                 # Log the request
                 lib.db.create_request(
-                    user_name=get_user_from_token(user_key['token']),
+                    user_name=get_username_from_token(user_key['token']),
                     model_name=request.model,
                     prompt=json.dumps(messages_for_log),
                     response=response_for_db,
@@ -356,7 +359,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         print("GET MODEL",lib.db.get_model(request.model).last_reset_date)
         log_metrics(
             request.model,
-            get_user_from_token(user_key['token']),
+            get_username_from_token(user_key['token']),
             total_tokens,
             response_time,
             cost_per_input,
@@ -364,7 +367,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         )
         # log the request in the database
         lib.db.create_request(
-            user_name=get_user_from_token(user_key['token']),
+            user_name=get_username_from_token(user_key['token']),
             model_name=request.model,
             prompt=json.dumps(messages_for_log),
             response=json.dumps(response_data),
@@ -378,7 +381,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
 
 # /embeddings endpoint
 @app.post("/v1/embeddings")
-async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_token)):
+async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_auth)):
     model_config = get_model_config(request.model, user_key)
     request_data = request.model_dump()
     
@@ -414,10 +417,10 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_to
     if total_tokens == 0:
         total_tokens = estimated_tokens
     # Log metrics
-    log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
+    log_metrics(request.model, get_username_from_token(user_key['token']), total_tokens, response_time)
     # log the request in the database
     lib.db.create_request(
-        user_name=get_user_from_token(user_key['token']),
+        user_name=get_username_from_token(user_key['token']),
         model_name=request.model,
         prompt=json.dumps(request.input),
         response=json.dumps(response_data),
@@ -437,7 +440,7 @@ async def create_transcription(
     prompt: Optional[str] = Form(None),
     response_format: Optional[str] = Form("json"),
     temperature: Optional[float] = Form(0),
-    user_key = Depends(verify_token)
+    user_key = Depends(verify_auth)
 ):
     # Validate file type
     allowed_extensions = {'.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm'}
@@ -499,10 +502,10 @@ async def create_transcription(
         
         estimated_tokens = estimate_tokens(transcription_text) if transcription_text else 0
         # Log metrics
-        log_metrics(model, get_user_from_token(user_key['token']), estimated_tokens, response_time)
+        log_metrics(model, get_username_from_token(user_key['token']), estimated_tokens, response_time)
         # Log the request in the database
         lib.db.create_request(
-            user_name=get_user_from_token(user_key['token']),
+            user_name=get_username_from_token(user_key['token']),
             model_name=model,
             prompt=f"Audio transcription: {file.filename}",
             response=json.dumps(response_data),
@@ -522,7 +525,7 @@ async def create_transcription(
 @app.post("/v1/audio/speech")
 async def create_speech(
     request: SpeechRequest, 
-    user_key = Depends(verify_token)
+    user_key = Depends(verify_auth)
 ):
     # Validate input length (e.g., max 4096 characters for most TTS models)
     max_input_length = 4096
@@ -570,10 +573,10 @@ async def create_speech(
         response_time = time.time() - start_time
         
         # Log metrics
-        log_metrics(request.model, get_user_from_token(user_key['token']), estimated_tokens, response_time)
+        log_metrics(request.model, get_username_from_token(user_key['token']), estimated_tokens, response_time)
         # Log the request in the database
         lib.db.create_request(
-            user_name=get_user_from_token(user_key['token']),
+            user_name=get_username_from_token(user_key['token']),
             model_name=request.model,
             prompt=f"TTS ({request.voice}): {request.input[:100]}{'...' if len(request.input) > 100 else ''}",  # Include voice in log
             response=f"Audio generated ({len(audio_data)} bytes)",

@@ -5,6 +5,7 @@ import yaml
 from typing import Optional
 from fastapi import Request, Response, Security, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from lib.rate_limit import rateLimit
 
 # In your config.yaml loading section
 with open("/config.yaml", "r") as f:
@@ -18,6 +19,10 @@ METRICS_PASSWORD = METRICS_AUTH.get('password', 'change-me')
 # Security
 security = HTTPBearer()
 
+
+
+    
+
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
@@ -30,10 +35,16 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-def get_user_from_token(token: str) -> Optional[str]:
+def get_username_from_token(token: str) -> Optional[str]:
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key['name']
+    return None
+
+def get_user_from_token(token: str) -> Optional[str]:
+    for key in CONFIG['keys']:
+        if key['token'] == token:
+            return key
     return None
 
 
@@ -72,3 +83,35 @@ async def metrics_auth_middleware(request: Request, call_next):
     
     response = await call_next(request)
     return response
+
+user_rate_limits = {}
+
+
+def check_rate_limit(user_key, rpm_limit):
+    current_rate_limit = user_rate_limits.get(user_key, None)
+    if current_rate_limit:
+        print(current_rate_limit.is_allowed())
+    
+    else:
+       rate_limit = rateLimit()
+       rate_limit.request_limit  = rpm_limit
+       user_rate_limits.update({
+           user_key: rate_limit
+       })
+
+    if user_rate_limits[user_key].is_allowed() == False:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests please wait before sending a new one",
+        )
+    
+
+
+
+def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+    user_key = verify_token(credentials)
+    token = credentials.credentials
+    user = get_user_from_token(token)
+    print("USER",user)
+    check_rate_limit(user["name"],user["rpm_limit"])
+    return user_key
