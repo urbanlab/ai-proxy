@@ -70,7 +70,13 @@ services:
       - "3000:8080"
     volumes:
       - ./data/openwebui_data:/app/backend/data
-
+  sqlite-web:
+    image: ghcr.io/coleifer/sqlite-web:latest
+    ports:
+      - "5000:8080"
+    volumes:
+      - ./data/:/data/
+    command: "requests.db"
 
 volumes:
   grafana-storage:

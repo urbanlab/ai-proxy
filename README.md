@@ -38,6 +38,9 @@ model_list:
       api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
       drop_params: true
       api_key: "no_token"
+      cost_per_token: 0.20 # 0.20€ for ex
+      max_budget: 10 # 10€ for ex 
+      budget_duration: 30d # frequency of reset (every x day counting from last update)
       max_input_tokens: 25000
 
 keys:

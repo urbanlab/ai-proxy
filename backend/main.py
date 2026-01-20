@@ -11,11 +11,12 @@ import os
 import base64
 from typing import Optional, List, Dict, Any
 import aiohttp
-from lib.types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
+from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
-from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64
+from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
 from lib.auth import metrics_auth_middleware, verify_token, get_user_from_token
 from lib.metric import log_metrics
+from lib.cost import calculate_token_cost
 import lib.db
 
 app = FastAPI(
@@ -27,7 +28,7 @@ app = FastAPI(
 )
 # CORS middleware
 app.add_middleware(
-    CORSMiddleware,
+   CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -112,6 +113,11 @@ def validate_image_content(content_item: MessageContent):
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_token)):
     model_config = get_model_config(request.model, user_key)
+    input_tokens_nb = estimate_tokens(message_to_string(request.messages))
+    cost_per_input_token = model_config["params"].get("cost_per_input_token", 0)
+    cost_per_output_token = model_config["params"].get("cost_per_output_token", 0)
+    cost_per_input = calculate_token_cost(cost_per_input_token, input_tokens_nb)
+
     
     # Validate vision support
     has_images = validate_vision_request(model_config, request.messages)
@@ -236,10 +242,18 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 
                 # Calculate metrics
                 response_time = time.time() - start_time
-                output_tokens = estimate_tokens(collected_response) if collected_response else 0
-                total_tokens = estimated_input_tokens + output_tokens
+                output_tokens_nb = estimate_tokens(collected_response) if collected_response else 0
+                cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
+                total_tokens = estimated_input_tokens + output_tokens_nb
                 # Log metrics
-                log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
+                log_metrics(
+                    request.model,
+                    get_user_from_token(user_key['token']),
+                    total_tokens,
+                    response_time,
+                    cost_per_input,
+                    cost_per_output
+                )
             
                 # Create a structured response for logging
                 if collected_response:
@@ -286,7 +300,10 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                     response=response_for_db,
                     co2=0,  # No CO2 tracking
                     tokens_used=total_tokens,
-                    response_latency=response_time
+                    response_latency=response_time,
+                    input_cost = cost_per_input,
+                    output_cost = cost_per_output
+
                 )
         
         return StreamingResponse(
@@ -330,7 +347,21 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         
         
          # Log metrics
-        log_metrics(request.model, get_user_from_token(user_key['token']), total_tokens, response_time)
+         #
+        output_tokens_nb = estimate_tokens(message_to_string(request.messages))  
+        cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
+        total_tokens = estimated_input_tokens + output_tokens_nb
+
+        # TODO check model date and compare to reset counter if not same month
+        print("GET MODEL",lib.db.get_model(request.model).last_reset_date)
+        log_metrics(
+            request.model,
+            get_user_from_token(user_key['token']),
+            total_tokens,
+            response_time,
+            cost_per_input,
+            cost_per_output
+        )
         # log the request in the database
         lib.db.create_request(
             user_name=get_user_from_token(user_key['token']),
@@ -339,7 +370,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             response=json.dumps(response_data),
             co2=0,  # No CO2 tracking
             tokens_used=total_tokens,
-            response_latency=response_time
+            response_latency=response_time,
+            input_cost = cost_per_input,
+            output_cost = cost_per_output
         )
         return response_data
 

@@ -2,6 +2,14 @@ from fastapi import status, HTTPException
 import tiktoken 
 import aiohttp
 import base64
+
+def message_to_string(messages):
+    text = ""
+    for message in messages:
+        text += message.content
+    return text
+
+
 # Helper function to estimate tokens (add this after your other helper functions)
 def estimate_tokens(text: str) -> int:
     """Estimate token count for text"""

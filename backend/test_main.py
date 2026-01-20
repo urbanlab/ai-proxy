@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 from main import app
-from lib.types import ChatCompletionResponse, EmbeddingResponse
+from lib.data_types import ChatCompletionResponse, EmbeddingResponse
 import os
 
 

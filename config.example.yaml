@@ -9,6 +9,9 @@ model_list:
           drop_params: false
           api_key: "no_token"
           max_input_tokens: 25000
+          cost_per_input_token: 0.25
+          cost_per_output_token: 0.80
+          max_budget: 10
           vision: true
      
   - model_name: devstral
@@ -18,7 +21,7 @@ model_list:
       drop_params: false
       api_key: "no_token"
       max_input_tokens: 25000
-
+      cost_per_token: 0.15
 keys:
   - name: "user"
     token: "token"
