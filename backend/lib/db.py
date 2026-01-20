@@ -1,6 +1,8 @@
 from peewee import *
 from datetime import datetime
 import os
+from lib.metric import reset_costs
+
 
 
 os.makedirs('/data', exist_ok=True)
@@ -82,22 +84,25 @@ def create_request(
     )
 
     # update user cost
-    if(user.last_reset_date.month == datetime.now().month):
+    if(user.last_reset_date.month != datetime.now().month):
+        print("USER RESET")
         user.input_cost = 0
         user.output_cost = 0
         user.total_cost = 0
+        user.last_reset_date = datetime.now()
     else:
         user.input_cost += input_cost
         user.output_cost += output_cost
         user.total_cost += (input_cost + output_cost)
     user.save()
     
-    if(model.last_reset_date.month == datetime.now().month):
-
+    if(model.last_reset_date.month != datetime.now().month):
+        print("MODEL RESET")
+        reset_costs(model_name,user_name)
         model.input_cost = 0
         model.output_cost = 0
         model.total_cost = 0
-
+        model.last_reset_date = datetime.now()
     else:
         # update user cost
         model.input_cost += input_cost
