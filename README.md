@@ -101,6 +101,15 @@ The database stores the following :
 - users: stores the cost for each user
 
 
-## ❤️ Humans.txt
+## Testing
+
+To launch tests 
+
+``` bash
+docker compose  --profile test up
+```
+
+## ❤ Humans.txt
 - aangelot
 - pipazoul
+- exodev

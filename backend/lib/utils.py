@@ -6,9 +6,14 @@ import base64
 def message_to_string(messages):
     text = ""
     for message in messages:
-        text += message.content
+        if isinstance(message.content, str):
+            text += message.content
+        elif isinstance(message.content, list):
+            # Extract only text content from multimodal messages
+            for item in message.content:
+                if hasattr(item, 'type') and item.type == "text":
+                    text += item.text
     return text
-
 
 # Helper function to estimate tokens (add this after your other helper functions)
 def estimate_tokens(text: str) -> int:
