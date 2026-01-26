@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import Request, Response, Security, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from lib.rate_limit import rateLimit
-
+from lib.metric import log_error
 # In your config.yaml loading section
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
@@ -29,6 +29,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key
+    log_error("anonymous", 401)
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or missing token or insufficient permissions",
@@ -89,7 +90,6 @@ user_rate_limits = {}
 
 def check_rate_limit(user_key, rpm_limit):
     current_rate_limit = user_rate_limits.get(user_key, None)
-    print("LETS CHECK DICT", user_rate_limits)
     if not current_rate_limit:
        rate_limit = rateLimit()
        rate_limit.request_limit  = rpm_limit
@@ -98,6 +98,8 @@ def check_rate_limit(user_key, rpm_limit):
        })
 
     if user_rate_limits[user_key].is_allowed() == False:
+
+        log_error(user_key, 429)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests please wait before sending a new one",

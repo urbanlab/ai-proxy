@@ -15,7 +15,7 @@ from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest,
 from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
 from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
 from lib.auth import metrics_auth_middleware, verify_token, get_username_from_token, verify_auth
-from lib.metric import log_metrics
+from lib.metric import log_metrics, log_error
 from lib.cost import calculate_token_cost
 import lib.db
 
@@ -46,6 +46,7 @@ with open("/config.yaml", "r") as f:
 
 def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any]:
     if model_name not in user_key['models']:
+        log_error(user_key["name"],403)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access to the model is forbidden for this user",
