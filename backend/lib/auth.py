@@ -89,10 +89,8 @@ user_rate_limits = {}
 
 def check_rate_limit(user_key, rpm_limit):
     current_rate_limit = user_rate_limits.get(user_key, None)
-    if current_rate_limit:
-        print(current_rate_limit.is_allowed())
-    
-    else:
+    print("LETS CHECK DICT", user_rate_limits)
+    if not current_rate_limit:
        rate_limit = rateLimit()
        rate_limit.request_limit  = rpm_limit
        user_rate_limits.update({
@@ -103,6 +101,10 @@ def check_rate_limit(user_key, rpm_limit):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests please wait before sending a new one",
+            headers={
+                "Retry-After": "60",
+                "X-Rate-Limit": str(rpm_limit)
+            }
         )
     
 
@@ -112,6 +114,5 @@ def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
     user_key = verify_token(credentials)
     token = credentials.credentials
     user = get_user_from_token(token)
-    print("USER",user)
-    check_rate_limit(user["name"],user["rpm_limit"])
+    check_rate_limit(user["name"],user.get("rpm_limit", 60))
     return user_key

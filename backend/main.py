@@ -114,7 +114,6 @@ def validate_image_content(content_item: MessageContent):
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_auth)):
-    print("User KEY ?", user_key)
     model_config = get_model_config(request.model, user_key)
     input_tokens_nb = estimate_tokens(message_to_string(request.messages))
     cost_per_input_token = model_config["params"].get("cost_per_input_token", 0)
