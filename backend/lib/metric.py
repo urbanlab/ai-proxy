@@ -70,7 +70,7 @@ total_cost_per_model = Gauge(
 )
 
 requests_errors = Counter(
-    'llm_requests_erros',
+    'llm_requests_errors',
     'Total number of requests by model and user',
     ['code','user']
 )
