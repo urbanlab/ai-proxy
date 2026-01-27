@@ -68,6 +68,17 @@ total_cost_per_model = Gauge(
     "Total token cost per model",
     ['model']
 )
+
+requests_errors = Counter(
+    'llm_requests_erros',
+    'Total number of requests by model and user',
+    ['code','user']
+)
+def log_error(
+        user: str,
+        code: str
+):
+    requests_errors.labels(code=code,user=user).inc()
 # prometheus log functions
 def log_metrics(
         model: str,

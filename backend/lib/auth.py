@@ -5,7 +5,8 @@ import yaml
 from typing import Optional
 from fastapi import Request, Response, Security, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
+from lib.rate_limit import rateLimit
+from lib.metric import log_error
 # In your config.yaml loading section
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
@@ -18,22 +19,33 @@ METRICS_PASSWORD = METRICS_AUTH.get('password', 'change-me')
 # Security
 security = HTTPBearer()
 
+
+
+    
+
 # verify user token and model access
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key
+    log_error("anonymous", 401)
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or missing token or insufficient permissions",
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-def get_user_from_token(token: str) -> Optional[str]:
+def get_username_from_token(token: str) -> Optional[str]:
     for key in CONFIG['keys']:
         if key['token'] == token:
             return key['name']
+    return None
+
+def get_user_from_token(token: str) -> Optional[str]:
+    for key in CONFIG['keys']:
+        if key['token'] == token:
+            return key
     return None
 
 
@@ -72,3 +84,37 @@ async def metrics_auth_middleware(request: Request, call_next):
     
     response = await call_next(request)
     return response
+
+user_rate_limits = {}
+
+
+def check_rate_limit(user_key, rpm_limit):
+    current_rate_limit = user_rate_limits.get(user_key, None)
+    if not current_rate_limit:
+       rate_limit = rateLimit()
+       rate_limit.request_limit  = rpm_limit
+       user_rate_limits.update({
+           user_key: rate_limit
+       })
+
+    if user_rate_limits[user_key].is_allowed() == False:
+
+        log_error(user_key, 429)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests please wait before sending a new one",
+            headers={
+                "Retry-After": "60",
+                "X-Rate-Limit": str(rpm_limit)
+            }
+        )
+    
+
+
+
+def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
+    user_key = verify_token(credentials)
+    token = credentials.credentials
+    user = get_user_from_token(token)
+    check_rate_limit(user["name"],user.get("rpm_limit", 60))
+    return user_key
