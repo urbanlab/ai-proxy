@@ -11,7 +11,6 @@ model_list:
           max_input_tokens: 25000
           cost_per_input_token: 0.25
           cost_per_output_token: 0.80
-          max_budget: 10
           vision: true
      
   - model_name: devstral
@@ -28,5 +27,4 @@ keys:
     models:
       - "qwen3"
       - "devstral"
-    max_concurrent_requests: 10
-    max_requests_per_minute: 6
+    rpm_limit: 5

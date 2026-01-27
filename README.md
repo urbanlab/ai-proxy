@@ -49,6 +49,7 @@ keys:
     token: "token"
     models:
       - "devstral"
+    rpm_limit: 60 # Number of request per min
 ```
 
 
