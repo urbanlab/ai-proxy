@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, Request, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from prometheus_client import make_asgi_app
@@ -12,13 +12,13 @@ import os
 import base64
 from typing import Optional, List, Dict, Any
 import aiohttp
-from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent, AnthropicMessageRequest
+from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
 from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
 from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
 from lib.auth import metrics_auth_middleware, verify_token, get_username_from_token, verify_auth
 from lib.metric import log_metrics, log_error
 from lib.cost import calculate_token_cost
-from lib.anthropic_compat import anthropic_to_openai_request, openai_to_anthropic_response, openai_stream_to_anthropic_stream, extract_text_from_anthropic_messages
+from lib.anthropic import fetch_anthropic_messages, fetch_anthropic_messages_stream, extract_text_from_anthropic_messages
 import lib.db
 
 
@@ -612,67 +612,74 @@ async def create_speech(
     except Exception as e:
         raise e
 
-# Anthropic-compatible /v1/messages endpoint
+# Anthropic-compatible /v1/messages endpoint — native passthrough
 @app.post("/v1/messages")
-async def anthropic_messages(request: AnthropicMessageRequest, user_key = Depends(verify_auth)):
-    model_config = get_model_config(request.model, user_key)
+async def anthropic_messages(raw_request: Request, user_key = Depends(verify_auth)):
+    # Read raw body to preserve all fields (tools, thinking, etc.)
+    request_dict = await raw_request.json()
+
+    model_name = request_dict.get("model")
+    stream = request_dict.get("stream", False)
+
+    if not model_name:
+        raise HTTPException(status_code=400, detail="model is required")
+
+    model_config = get_model_config(model_name, user_key)
 
     cost_per_input_token = model_config["params"].get("cost_per_input_token", 0)
     cost_per_output_token = model_config["params"].get("cost_per_output_token", 0)
 
-    request_dict = request.model_dump()
-
     # Token / cost estimation for input
     input_text = extract_text_from_anthropic_messages(
-        request_dict["messages"], request_dict.get("system")
+        request_dict.get("messages", []), request_dict.get("system")
     )
     input_tokens_nb = estimate_tokens(input_text)
     cost_per_input = calculate_token_cost(cost_per_input_token, input_tokens_nb)
 
-    # Convert to OpenAI format and set the real backend model name
-    openai_request = anthropic_to_openai_request(request_dict)
-    openai_request["model"] = model_config["params"]["model"]
-
-    if model_config["params"].get("drop_params"):
-        allowed = {"model", "messages", "stream", "max_tokens", "temperature", "top_p", "stop"}
-        openai_request = {k: v for k, v in openai_request.items() if k in allowed and v is not None}
-
-    message_id = f"msg_{uuid.uuid4().hex[:24]}"
     start_time = time.time()
     username = get_username_from_token(user_key["token"])
 
-    if request.stream:
+    anthropic_headers = {
+        "anthropic-beta": raw_request.headers.get("anthropic-beta", ""),
+        "anthropic-version": raw_request.headers.get("anthropic-version", ""),
+    }
+
+    # Replace model name with the real backend model
+    request_dict["model"] = model_config["params"]["model"]
+
+    if stream:
         collected_text = ""
 
         async def event_generator():
             nonlocal collected_text
             try:
-                openai_gen = fetch_chat_completion_stream(model_config, openai_request)
-                async for event in openai_stream_to_anthropic_stream(
-                    openai_gen, request.model, message_id, input_tokens_nb
+                async for chunk in fetch_anthropic_messages_stream(
+                    model_config, request_dict, anthropic_headers
                 ):
-                    # Collect generated text for logging
-                    if "text_delta" in event:
+                    # Collect text for logging
+                    if "text_delta" in chunk:
                         try:
-                            data_str = event.split("data: ", 1)[1]
+                            data_str = chunk.split("data: ", 1)[1]
                             evt = json.loads(data_str)
                             if evt.get("delta", {}).get("type") == "text_delta":
                                 collected_text += evt["delta"].get("text", "")
                         except Exception:
                             pass
-                    yield event
+                    yield chunk
+            except HTTPException:
+                raise
             except Exception as e:
-                error_event = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+                error_event = {"type": "error", "error": {"type": "api_error", "message": f"Model is not compatible with the Anthropic Messages API: {e}"}}
                 yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
             finally:
                 response_time = time.time() - start_time
                 output_tokens_nb = estimate_tokens(collected_text)
                 cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
                 total_tokens = input_tokens_nb + output_tokens_nb
-                log_metrics(request.model, username, total_tokens, response_time, cost_per_input, cost_per_output)
+                log_metrics(model_name, username, total_tokens, response_time, cost_per_input, cost_per_output)
                 lib.db.create_request(
                     user_name=username,
-                    model_name=request.model,
+                    model_name=model_name,
                     prompt=json.dumps(request_dict.get("messages", [])),
                     response=collected_text,
                     co2=0,
@@ -692,23 +699,31 @@ async def anthropic_messages(request: AnthropicMessageRequest, user_key = Depend
             },
         )
     else:
-        openai_response = await fetch_chat_completion(model_config, openai_request)
+        try:
+            anthropic_response = await fetch_anthropic_messages(
+                model_config, request_dict, anthropic_headers
+            )
+        except HTTPException as e:
+            raise HTTPException(
+                status_code=e.status_code,
+                detail=f"Model is not compatible with the Anthropic Messages API: {e.detail}",
+            )
+
         response_time = time.time() - start_time
 
-        anthropic_response = openai_to_anthropic_response(openai_response, request.model, message_id)
-
-        output_tokens_nb = anthropic_response["usage"]["output_tokens"]
+        output_tokens_nb = anthropic_response.get("usage", {}).get("output_tokens", 0)
         if output_tokens_nb == 0:
-            text = anthropic_response["content"][0]["text"] if anthropic_response["content"] else ""
+            content = anthropic_response.get("content", [])
+            text = content[0]["text"] if content else ""
             output_tokens_nb = estimate_tokens(text)
 
         cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
         total_tokens = input_tokens_nb + output_tokens_nb
 
-        log_metrics(request.model, username, total_tokens, response_time, cost_per_input, cost_per_output)
+        log_metrics(model_name, username, total_tokens, response_time, cost_per_input, cost_per_output)
         lib.db.create_request(
             user_name=username,
-            model_name=request.model,
+            model_name=model_name,
             prompt=json.dumps(request_dict.get("messages", [])),
             response=json.dumps(anthropic_response),
             co2=0,
@@ -719,6 +734,11 @@ async def anthropic_messages(request: AnthropicMessageRequest, user_key = Depend
         )
 
         return anthropic_response
+
+
+@app.post("/v1/messages/count_tokens")
+async def count_tokens(user_key = Depends(verify_auth)):
+    raise HTTPException(status_code=501, detail="Token counting not supported")
 
 
 # list models endpoint
@@ -740,7 +760,7 @@ async def list_models(user_key = Depends(verify_token)):
                 model_info["capabilities"] = ["text", "vision"]
             else:
                 model_info["capabilities"] = ["text"]
-                
+
             models.append(model_info)
     
     return {

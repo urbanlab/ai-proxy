@@ -17,18 +17,26 @@ METRICS_USERNAME = METRICS_AUTH.get('username', 'admin')
 METRICS_PASSWORD = METRICS_AUTH.get('password', 'change-me')
 
 # Security
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 
     
 
 # verify user token and model access
-def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
-    token = credentials.credentials
-    for key in CONFIG['keys']:
-        if key['token'] == token:
-            return key
+def verify_token(request: Request, credentials: HTTPAuthorizationCredentials = Security(security)):
+    # Try Bearer token first, then fall back to x-api-key header (Anthropic convention)
+    token = None
+    if credentials:
+        token = credentials.credentials
+    else:
+        token = request.headers.get("x-api-key")
+
+    if token:
+        for key in CONFIG['keys']:
+            if key['token'] == token:
+                return key
+
     log_error("anonymous", 401)
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -112,9 +120,9 @@ def check_rate_limit(user_key, rpm_limit):
 
 
 
-def verify_auth(credentials: HTTPAuthorizationCredentials = Security(security)):
-    user_key = verify_token(credentials)
-    token = credentials.credentials
+def verify_auth(request: Request, credentials: HTTPAuthorizationCredentials = Security(security)):
+    user_key = verify_token(request, credentials)
+    token = credentials.credentials if credentials else request.headers.get("x-api-key")
     user = get_user_from_token(token)
     check_rate_limit(user["name"],user.get("rpm_limit", 60))
     return user_key
