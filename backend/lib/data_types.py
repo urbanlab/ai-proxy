@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Union
+from typing import Dict, Any, List, Optional, Union
 
 # Add these models after your existing Pydantic models
 class TranscriptionRequest(BaseModel):
@@ -89,3 +89,35 @@ class SpeechRequest(BaseModel):
     voice: str = "alloy"  # alloy, echo, fable, onyx, nova, shimmer
     response_format: Optional[str] = "mp3"  # mp3, opus, aac, flac, wav, pcm
     speed: Optional[float] = Field(1.0, ge=0.25, le=4.0)  # Speed between 0.25 and 4.0
+
+
+# Anthropic-compatible types
+class AnthropicImageSource(BaseModel):
+    type: str  # "base64" or "url"
+    media_type: Optional[str] = None
+    data: Optional[str] = None
+    url: Optional[str] = None
+
+
+class AnthropicContentBlock(BaseModel):
+    type: str  # "text" or "image"
+    text: Optional[str] = None
+    source: Optional[AnthropicImageSource] = None
+
+
+class AnthropicMessage(BaseModel):
+    role: str
+    content: Union[str, List[AnthropicContentBlock]]
+
+
+class AnthropicMessageRequest(BaseModel):
+    model: str
+    messages: List[AnthropicMessage]
+    max_tokens: int  # Required in Anthropic API
+    system: Optional[Union[str, List[AnthropicContentBlock]]] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    top_k: Optional[int] = None
+    stop_sequences: Optional[List[str]] = None
+    stream: Optional[bool] = False
+    metadata: Optional[Dict[str, Any]] = None
