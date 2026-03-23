@@ -111,6 +111,8 @@ class AnthropicMessage(BaseModel):
 
 
 class AnthropicMessageRequest(BaseModel):
+    model_config = {"extra": "allow"}
+
     model: str
     messages: List[AnthropicMessage]
     max_tokens: int  # Required in Anthropic API

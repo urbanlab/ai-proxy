@@ -12,7 +12,7 @@ import os
 import base64
 from typing import Optional, List, Dict, Any
 import aiohttp
-from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent
+from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent, AnthropicMessageRequest
 from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
 from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
 from lib.auth import metrics_auth_middleware, verify_token, get_username_from_token, verify_auth
@@ -612,15 +612,11 @@ async def create_speech(
 
 # Anthropic-compatible /v1/messages endpoint — native passthrough
 @app.post("/v1/messages")
-async def anthropic_messages(raw_request: Request, user_key = Depends(verify_auth)):
-    # Read raw body to preserve all fields (tools, thinking, etc.)
-    request_dict = await raw_request.json()
+async def anthropic_messages(request: AnthropicMessageRequest, raw_request: Request, user_key = Depends(verify_auth)):
+    request_dict = request.model_dump(exclude_none=True)
 
-    model_name = request_dict.get("model")
-    stream = request_dict.get("stream", False)
-
-    if not model_name:
-        raise HTTPException(status_code=400, detail="model is required")
+    model_name = request.model
+    stream = request.stream
 
     model_config = get_model_config(model_name, user_key)
 
@@ -629,7 +625,7 @@ async def anthropic_messages(raw_request: Request, user_key = Depends(verify_aut
 
     # Token / cost estimation for input
     input_text = extract_text_from_anthropic_messages(
-        request_dict.get("messages", []), request_dict.get("system")
+        request_dict.get("messages", []), request_dict.get("system", None)
     )
     input_tokens_nb = estimate_tokens(input_text)
     cost_per_input = calculate_token_cost(cost_per_input_token, input_tokens_nb)
