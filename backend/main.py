@@ -357,8 +357,6 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
         total_tokens = estimated_input_tokens + output_tokens_nb
 
-        # TODO check model date and compare to reset counter if not same month
-        print("GET MODEL",lib.db.get_model(request.model).last_reset_date)
         log_metrics(
             request.model,
             get_username_from_token(user_key['token']),
