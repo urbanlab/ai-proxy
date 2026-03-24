@@ -40,6 +40,9 @@ class Message(BaseModel):
     content: Union[str,List[MessageContent]]  # Can be string or list for vision
     name: Optional[str] = None
 
+class ResponseFormat(BaseModel):
+    type: str  # "text" or "json_object"
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[Message]
@@ -51,6 +54,7 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[List[str]] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
+    response_format: Optional[ResponseFormat] = None
     usage: Optional[Usage] = None
 
 class ChatCompletionResponseChoice(BaseModel):
