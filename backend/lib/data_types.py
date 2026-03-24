@@ -44,6 +44,8 @@ class ResponseFormat(BaseModel):
     type: str  # "text" or "json_object"
 
 class ChatCompletionRequest(BaseModel):
+    model_config = {"extra": "allow"}
+
     model: str
     messages: List[Message]
     max_tokens: Optional[int] = Field(None, alias="max_tokens")

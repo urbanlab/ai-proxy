@@ -169,7 +169,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
     
     if model_config['params'].get('drop_params'):
         # Keep OpenAI-compatible parameters only
-        allowed_params = ["model", "messages", "stream", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user", "response_format"]
+        allowed_params = ["model", "messages", "stream", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user", "response_format", "tools", "tool_choice"]
         request_data = {k: v for k, v in request_data.items() if k in allowed_params and v is not None}
         
         # Some models don't allow both temperature and top_p
