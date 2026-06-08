@@ -161,7 +161,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         })
                 openai_messages.append({"role": message.role, "content": openai_content})
             else:
-                openai_messages.append({"role": message.role, "content": message.content})
+                openai_messages.append({"role": message.role, "content": message.content or ""})
         request_data["messages"] = openai_messages
     
     # Use the actual model name from config
@@ -198,6 +198,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             for key, value in msg.items():
                 if value is not None:
                     clean_msg[key] = value
+            # Assistant tool_call messages may have content: null — keep it as empty string
+            if clean_msg.get("role") == "assistant" and "content" not in clean_msg:
+                clean_msg["content"] = ""
             cleaned_messages.append(clean_msg)
         request_data["messages"] = cleaned_messages
 
@@ -285,7 +288,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 # Prepare messages for logging
                 messages_for_log = []
                 for msg in request.messages:
-                    if isinstance(msg.content, str):
+                    if msg.content is None:
+                        messages_for_log.append({"role": msg.role, "content": ""})
+                    elif isinstance(msg.content, str):
                         messages_for_log.append({"role": msg.role, "content": msg.content})
                     else:
                         # For vision messages, create a summary
@@ -338,7 +343,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         # Prepare messages for logging
         messages_for_log = []
         for msg in request.messages:
-            if isinstance(msg.content, str):
+            if msg.content is None:
+                messages_for_log.append({"role": msg.role, "content": ""})
+            elif isinstance(msg.content, str):
                 messages_for_log.append({"role": msg.role, "content": msg.content})
             else:
                 # For vision messages, create a summary
@@ -614,6 +621,11 @@ async def create_speech(
 @app.post("/v1/messages")
 async def anthropic_messages(request: AnthropicMessageRequest, raw_request: Request, user_key = Depends(verify_auth)):
     request_dict = request.model_dump(exclude_none=True)
+
+    # Ensure all messages have a content field (assistant tool_use messages may have content: null)
+    for msg in request_dict.get("messages", []):
+        if "content" not in msg:
+            msg["content"] = []
 
     model_name = request.model
     stream = request.stream

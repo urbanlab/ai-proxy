@@ -37,7 +37,7 @@ class Usage(BaseModel):
 
 class Message(BaseModel):
     role: str
-    content: Union[str,List[MessageContent]]  # Can be string or list for vision
+    content: Optional[Union[str, List[MessageContent]]] = None  # Can be string, list for vision, or null for tool_use
     name: Optional[str] = None
 
 class ResponseFormat(BaseModel):
@@ -113,7 +113,7 @@ class AnthropicContentBlock(BaseModel):
 
 class AnthropicMessage(BaseModel):
     role: str
-    content: Union[str, List[AnthropicContentBlock]]
+    content: Optional[Union[str, List[AnthropicContentBlock]]] = None
 
 
 class AnthropicMessageRequest(BaseModel):
