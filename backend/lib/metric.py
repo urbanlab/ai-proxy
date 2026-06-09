@@ -74,6 +74,15 @@ requests_errors = Counter(
     'Total number of requests by model and user',
     ['code','user']
 )
+
+endpoint_health = Gauge(
+    'llm_endpoint_healthy',
+    'Health of each load-balanced upstream endpoint (1=healthy, 0=unhealthy)',
+    ['model', 'api_base']
+)
+def log_endpoint_health(model: str, api_base: str, healthy: bool):
+    endpoint_health.labels(model=model, api_base=api_base).set(1 if healthy else 0)
+
 def log_error(
         user: str,
         code: str

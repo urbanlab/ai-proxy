@@ -19,6 +19,7 @@ from lib.auth import metrics_auth_middleware, verify_token, get_username_from_to
 from lib.metric import log_metrics, log_error
 from lib.cost import calculate_token_cost
 from lib.anthropic import fetch_anthropic_messages, fetch_anthropic_messages_stream, extract_text_from_anthropic_messages
+from lib.loadbalancer import LoadBalancer
 import lib.db
 
 
@@ -46,6 +47,23 @@ app.mount("/metrics", metrics_app)
 with open("/config.yaml", "r") as f:
     CONFIG = yaml.safe_load(f)
 
+# Load balancer: when a model_name is declared multiple times in model_list,
+# requests are spread across the healthy endpoints in round-robin order.
+load_balancer = LoadBalancer(
+    CONFIG,
+    interval=CONFIG.get("health_check_interval", 30),
+    timeout=CONFIG.get("health_check_timeout", 5),
+)
+
+
+@app.on_event("startup")
+async def _start_load_balancer():
+    # Run an initial probe so health state is accurate before traffic arrives,
+    # then keep checking in the background.
+    await load_balancer.check_all()
+    load_balancer.start()
+
+
 def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any]:
     if model_name not in user_key['models']:
         log_error(user_key["name"],403)
@@ -53,13 +71,14 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access to the model is forbidden for this user",
         )
-    for model in CONFIG['model_list']:
-        if model['model_name'] == model_name:
-            return model  # Return the complete model config, not just params
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Model not found",
-    )
+    # Picks a healthy endpoint, load-balancing when several share this model_name.
+    model = load_balancer.select(model_name)
+    if model is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Model not found",
+        )
+    return model  # Complete model config (same shape as a model_list entry)
 
 
 
@@ -773,6 +792,11 @@ async def list_models(user_key = Depends(verify_token)):
         "object": "list",
         "data": models
     }
+
+# Load-balancer endpoint health (which replicas are up for each multi-endpoint model)
+@app.get("/health/endpoints")
+async def endpoints_health():
+    return load_balancer.health_snapshot()
 
 if __name__ == "__main__":
     import uvicorn

@@ -3,7 +3,7 @@ services:
   test:
     profiles:
       - test
-    image: erasme/ai-proxy:latest
+    image: erasme/ai-proxy:dev
     build:
       context: ./backend
       dockerfile: Dockerfile
