@@ -19,7 +19,7 @@ services:
   api:
     profiles:
       - api
-    image: erasme/ai-proxy:latest
+    image: erasme/ai-proxy:dev
     build:
       context: ./backend
       dockerfile: Dockerfile

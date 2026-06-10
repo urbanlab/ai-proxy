@@ -69,18 +69,12 @@ async def fetch_chat_completion_stream(model_config: Dict[str, Any], request_dat
     if model_config['params'].get('api_key') and model_config['params']['api_key'] != "no_token":
         headers["Authorization"] = f"Bearer {model_config['params']['api_key']}"
     
-    print(f"Making request to: {url}")  # Debug log
-    
     async with aiohttp.ClientSession() as session:
         async with session.post(url, headers=headers, json=request_data) as resp:
             if resp.status != 200:
                 text = await resp.text()
-                print(f"Error response: {text}")  # Debug log
                 raise HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
-            
-            print(f"Response status: {resp.status}")  # Debug log
-            print(f"Response headers: {dict(resp.headers)}")  # Debug log
-            
+
             # Process line by line, not chunk by chunk
             async for line in resp.content:
                 line_str = line.decode('utf-8').strip()

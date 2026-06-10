@@ -8,6 +8,9 @@ model_list:
           api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
           drop_params: false
           api_key: "no_token"
+          # Optional. If set, requests whose estimated input exceeds this many
+          # tokens are rejected with a 400 context_length_exceeded error. Omit
+          # to disable the check and let the upstream enforce its own limit.
           max_input_tokens: 25000
           cost_per_input_token: 0.25
           cost_per_output_token: 0.80

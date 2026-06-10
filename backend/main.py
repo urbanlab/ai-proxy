@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from prometheus_client import make_asgi_app
 import tempfile
 import io
@@ -195,18 +195,22 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         if 'temperature' in request_data and 'top_p' in request_data:
             # Remove top_p, keep temperature (or vice versa based on your preference)
             request_data.pop('top_p')
-    # Don't truncate messages with images
-    if model_config['params'].get('max_input_tokens') and not has_images:
-        # Only truncate text-only messages
-        total_tokens = 0
-        for msg in request_data['messages']:
-            if isinstance(msg.get('content'), str):
-                total_tokens += len(msg['content'].split())
-        
-        while total_tokens > model_config['params']['max_input_tokens'] and len(request_data['messages']) > 1:
-            removed_msg = request_data['messages'].pop(0)
-            if isinstance(removed_msg.get('content'), str):
-                total_tokens -= len(removed_msg['content'].split())
+    # Enforce a configured input-token limit, if one is set for this model. When
+    # `max_input_tokens` is present we reject over-limit requests with an
+    # OpenAI-compatible error instead of silently truncating. When it is not set,
+    # we do nothing and let the upstream enforce its own context window.
+    max_input_tokens = model_config['params'].get('max_input_tokens')
+    if max_input_tokens and input_tokens_nb > max_input_tokens:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Prompt is too long",
+                },
+            },
+        )
     
     # Clean up messages to remove None values for Scaleway compatibility
     if "messages" in request_data:
@@ -228,7 +232,6 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
     
     # Estimate input tokens with vision support
     estimated_input_tokens = estimate_tokens(request.messages[0].content if isinstance(request.messages[0].content, str) else "")
-    print(f"Estimated input tokens: {estimated_input_tokens}")  # Debug log
     if request.stream:
         # streaming response
         collected_response = ""
@@ -706,6 +709,22 @@ async def anthropic_messages(request: AnthropicMessageRequest, raw_request: Requ
     )
     input_tokens_nb = estimate_tokens(input_text)
     cost_per_input = calculate_token_cost(cost_per_input_token, input_tokens_nb)
+
+    # Enforce a configured input-token limit, if one is set for this model. When
+    # `max_input_tokens` is present we reject over-limit requests; otherwise we let
+    # the upstream enforce its own context window.
+    max_input_tokens = model_config["params"].get("max_input_tokens")
+    if max_input_tokens and input_tokens_nb > max_input_tokens:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Prompt is too long",
+                },
+            },
+        )
 
     start_time = time.time()
     username = get_username_from_token(user_key["token"])
