@@ -43,6 +43,10 @@ class Message(BaseModel):
 class ResponseFormat(BaseModel):
     type: str  # "text" or "json_object"
 
+class StreamOptions(BaseModel):
+    # When include_usage is true, a final usage chunk is emitted before [DONE]
+    include_usage: Optional[bool] = None
+
 class ChatCompletionRequest(BaseModel):
     model_config = {"extra": "allow"}
 
@@ -53,6 +57,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
     stop: Optional[List[str]] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0

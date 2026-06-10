@@ -188,7 +188,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
     
     if model_config['params'].get('drop_params'):
         # Keep OpenAI-compatible parameters only
-        allowed_params = ["model", "messages", "stream", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user", "response_format", "tools", "tool_choice"]
+        allowed_params = ["model", "messages", "stream", "stream_options", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user", "response_format", "tools", "tool_choice"]
         request_data = {k: v for k, v in request_data.items() if k in allowed_params and v is not None}
         
         # Some models don't allow both temperature and top_p
@@ -233,21 +233,43 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         # streaming response
         collected_response = ""
         collected_chunks = []  # Store all chunks for logging
-        
+        # OpenAI-compatible streaming usage: only emit our own usage chunk when the
+        # client asked for it (stream_options.include_usage) AND the upstream did not
+        # already stream one — otherwise we'd duplicate it.
+        include_usage = bool(request.stream_options and request.stream_options.include_usage)
+        upstream_usage = None  # real usage object from upstream, if it streams one
+        stream_id = None
+        stream_created = None
+        stream_model = None
+
         async def event_generator():
             nonlocal collected_response, collected_chunks
+            nonlocal upstream_usage, stream_id, stream_created, stream_model
             try:
                 async for chunk in fetch_chat_completion_stream(model_config, request_data):
+                    # Suppress the upstream terminator; we emit a single, well-ordered
+                    # terminal sequence (optional usage chunk + [DONE]) ourselves below.
+                    if chunk.strip().endswith("[DONE]"):
+                        continue
+
                     # Store the raw chunk
                     collected_chunks.append(chunk)
-                    
-                    # Try to extract content from streaming chunks
-                    if chunk.startswith("data: ") and not chunk.strip().endswith("[DONE]"):
+
+                    # Inspect data chunks: capture stream identifiers, any upstream
+                    # usage object, and accumulate streamed content for accounting.
+                    if chunk.startswith("data: "):
                         try:
                             chunk_data = json.loads(chunk[6:])  # Remove "data: " prefix
-                            if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
-                                delta = chunk_data['choices'][0].get('delta', {})
-                                if 'content' in delta:
+                            if stream_id is None and chunk_data.get('id'):
+                                stream_id = chunk_data['id']
+                                stream_created = chunk_data.get('created')
+                                stream_model = chunk_data.get('model')
+                            if chunk_data.get('usage'):
+                                upstream_usage = chunk_data['usage']
+                            choices = chunk_data.get('choices') or []
+                            if len(choices) > 0:
+                                delta = choices[0].get('delta', {})
+                                if delta.get('content'):
                                     collected_response += delta['content']
                         except json.JSONDecodeError:
                             pass
@@ -264,14 +286,38 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 }
                 yield f"data: {json.dumps(error_data)}\n\n"
             finally:
+                # If the client requested usage and the upstream did not already
+                # stream a usage object, emit an OpenAI-compatible usage chunk
+                # (empty choices + usage) right before the terminator.
+                if include_usage and upstream_usage is None:
+                    completion_tokens = estimate_tokens(collected_response) if collected_response else 0
+                    usage_chunk = {
+                        "id": stream_id or f"chatcmpl-{int(start_time)}",
+                        "object": "chat.completion.chunk",
+                        "created": stream_created or int(start_time),
+                        "model": stream_model or request.model,
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": input_tokens_nb,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": input_tokens_nb + completion_tokens,
+                        },
+                    }
+                    yield f"data: {json.dumps(usage_chunk)}\n\n"
+
                 # Send the final [DONE] message
                 yield "data: [DONE]\n\n"
-                
-                # Calculate metrics
+
+                # Calculate metrics — prefer the upstream's real token counts when it
+                # streamed them, otherwise fall back to local estimates.
                 response_time = time.time() - start_time
-                output_tokens_nb = estimate_tokens(collected_response) if collected_response else 0
+                if upstream_usage:
+                    output_tokens_nb = upstream_usage.get('completion_tokens') or 0
+                    total_tokens = upstream_usage.get('total_tokens') or (input_tokens_nb + output_tokens_nb)
+                else:
+                    output_tokens_nb = estimate_tokens(collected_response) if collected_response else 0
+                    total_tokens = input_tokens_nb + output_tokens_nb
                 cost_per_output = calculate_token_cost(cost_per_output_token, output_tokens_nb)
-                total_tokens = estimated_input_tokens + output_tokens_nb
                 # Log metrics
                 log_metrics(
                     request.model,
