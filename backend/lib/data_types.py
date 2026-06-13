@@ -36,9 +36,18 @@ class Usage(BaseModel):
     completion_tokens_details: Optional[UsageDetails] = None
 
 class Message(BaseModel):
+    # Allow provider-specific extras (e.g. reasoning_content) to pass through
+    # untouched instead of being silently dropped on the round-trip.
+    model_config = {"extra": "allow"}
+
     role: str
     content: Optional[Union[str, List[MessageContent]]] = None  # Can be string, list for vision, or null for tool_use
     name: Optional[str] = None
+    # Tool-calling fields: an assistant turn carries `tool_calls`, and a
+    # subsequent `tool` message references it via `tool_call_id`. These MUST be
+    # preserved across the proxy or agentic loops lose their state and stop early.
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
 
 class ResponseFormat(BaseModel):
     type: str  # "text" or "json_object"

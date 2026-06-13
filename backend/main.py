@@ -835,23 +835,29 @@ async def count_tokens(user_key = Depends(verify_auth)):
 @app.get("/v1/models")
 async def list_models(user_key = Depends(verify_token)):
     models = []
+    seen = set()
     for model in CONFIG['model_list']:
-        if model['model_name'] in user_key['models']:
-            model_info = {
-                "id": model['model_name'],
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "organization",
-                "permission": [],
-            }
-            
-            # Add vision capability information
-            if model['params'].get('vision', False):
-                model_info["capabilities"] = ["text", "vision"]
-            else:
-                model_info["capabilities"] = ["text"]
+        name = model['model_name']
+        # A model_name may be declared multiple times for load balancing; expose
+        # it to clients only once, otherwise tools like Cline see duplicates.
+        if name in seen or name not in user_key['models']:
+            continue
+        seen.add(name)
+        model_info = {
+            "id": name,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "organization",
+            "permission": [],
+        }
 
-            models.append(model_info)
+        # Add vision capability information
+        if model['params'].get('vision', False):
+            model_info["capabilities"] = ["text", "vision"]
+        else:
+            model_info["capabilities"] = ["text"]
+
+        models.append(model_info)
     
     return {
         "object": "list",
