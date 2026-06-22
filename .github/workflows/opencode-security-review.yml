@@ -1,9 +1,15 @@
 name: opencode-security-review
 
+# Reviews the latest commit pushed to the branch for newly introduced
+# security vulnerabilities and opens a GitHub issue (mentioning the commit
+# author) if it finds any. It runs the OpenCode CLI directly, because the
+# OpenCode GitHub Action does NOT support `push` events ("Unsupported event
+# type: push"). The CLI works on any event.
+
 on:
   push:
     branches:
-      - "**"
+      - main          # add other branches here if you push to them directly
 
 permissions:
   contents: read
@@ -17,65 +23,67 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 2          # HEAD + its parent, so we can diff the commit
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run OpenCode security review
-        uses: anomalyco/opencode/github@latest
+      - name: Install OpenCode CLI
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Review latest commit for vulnerabilities
         env:
           OPEN_CODE_API_KEY: ${{ secrets.OPEN_CODE_API_KEY }}
           OPEN_CODE_API_URL: ${{ secrets.OPEN_CODE_API_URL }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          model: erasme-ai-proxy/qwen3.6
-          use_github_token: true
-          prompt: |
-            You are a security review agent (similar to CodeRabbit) running in CI.
-            You have a shell with `git` and the `gh` CLI already authenticated.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}     # authenticates the gh CLI for the agent
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          SHORT_SHA="${SHA:0:7}"
+          COMMIT_URL="$SERVER_URL/$REPO/commit/$SHA"
 
-            Context for the commit that just triggered this run:
-            - Repository:   ${{ github.repository }}
-            - Commit SHA:   ${{ github.sha }}
-            - Pushed by:    @${{ github.actor }}
-            - Commit author (from git metadata) may differ; trust git for the author name.
-            - Commit URL:   ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          PROMPT="You are a security review agent (similar to CodeRabbit) running in CI.
+          You have a shell with git and the gh CLI (already authenticated via GH_TOKEN).
 
-            STEP 1 — Inspect ONLY this commit's changes:
-              Run: git show ${{ github.sha }}
-              (fallback for the repo's first commit: git show HEAD)
-              Review only the lines this commit ADDED or CHANGED. Ignore
-              pre-existing problems that are outside this diff.
+          Context for the commit that was just pushed:
+          - Repository:  $REPO
+          - Commit SHA:  $SHA
+          - Author:      @$ACTOR
+          - Commit URL:  $COMMIT_URL
 
-            STEP 2 — Look for vulnerabilities INTRODUCED by this commit, e.g.:
-              - Injection: SQL, command, LDAP, XSS, template (SSTI)
-              - Hardcoded secrets, credentials, API keys, tokens
-              - Path traversal / arbitrary file read or write
-              - Broken authn/authz or missing access checks
-              - Insecure deserialization, unsafe eval / dynamic code exec
-              - Weak or broken crypto, insecure randomness
-              - SSRF, open redirects
-              - Newly added dependencies that are known-vulnerable
+          STEP 1 - Inspect ONLY this commit's changes:
+            Run: git show $SHA
+            Review only the lines this commit ADDED or CHANGED.
+            Ignore pre-existing problems outside this diff.
 
-            STEP 3 — Decide:
-              - If you find NO genuine vulnerability: do nothing, print
-                "No vulnerabilities found", and stop. Do NOT open an issue.
-              - Before opening anything, avoid duplicates:
-                  gh issue list --state open --search "Security review ${{ github.sha }}"
-                If an issue for this commit already exists, stop.
-              - Otherwise create exactly ONE issue:
-                  gh issue create \
-                    --title "Security review: possible vulnerability in commit <short-sha>" \
-                    --body "<body below>"
-                If --label security fails because the label doesn't exist,
-                retry the command without --label.
+          STEP 2 - Look for vulnerabilities INTRODUCED by this commit, e.g.:
+            injection (SQL/command/LDAP/XSS/SSTI), hardcoded secrets or
+            credentials, path traversal, broken authn/authz, insecure
+            deserialization, unsafe eval or dynamic code execution, weak or
+            broken crypto, insecure randomness, SSRF, open redirects, or
+            newly added known-vulnerable dependencies.
 
-            The issue body MUST include:
-              - The commit link: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
-              - An @mention of the author: @${{ github.actor }}
-              - For each finding: severity (Critical/High/Medium/Low), the
-                file and line, a one-line description, why it is exploitable,
-                and a concrete remediation or code suggestion.
+          STEP 3 - Decide and act:
+            - If you find NO genuine vulnerability: print exactly
+              NO_VULNERABILITIES_FOUND and do nothing else.
+            - Otherwise, first avoid duplicates by running:
+                gh issue list --state open --search \"Security review $SHA\"
+              If an open issue for this commit already exists, stop.
+            - Otherwise create exactly ONE issue with:
+                gh issue create --title \"Security review: possible vulnerability in $SHORT_SHA\" --body \"...\"
+              (If --label security fails because the label is missing, retry without --label.)
 
-            Be precise, not noisy. Only flag findings you are confident are
-            real, exploitable vulnerabilities. Prefer false negatives over
-            false positives.
+          The issue body MUST include:
+            - the commit link: $COMMIT_URL
+            - an @mention of the author: @$ACTOR
+            - for each finding: severity (Critical/High/Medium/Low), file and
+              line, a one-line description, why it is exploitable, and a
+              concrete fix.
+
+          Be precise, not noisy: only flag findings you are confident are
+          real, exploitable vulnerabilities. Prefer false negatives over
+          false positives."
+
+          opencode run -m erasme-ai-proxy/qwen3.6 "$PROMPT"
