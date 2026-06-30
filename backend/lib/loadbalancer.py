@@ -77,6 +77,38 @@ class LoadBalancer:
         self._rr[model_name] = idx + 1
         return pool[idx]
 
+    def candidates(self, model_name: str) -> List[Dict[str, Any]]:
+        """Ordered endpoints to attempt for `model_name`, best first.
+
+        Healthy replicas come first in round-robin order (so concurrent requests
+        still spread across GPUs), then currently-unhealthy ones as a last
+        resort. The caller walks this list, failing over on connection errors,
+        so a downed endpoint never reaches the client as an error while another
+        replica can serve the request.
+        """
+        endpoints = self._groups.get(model_name)
+        if not endpoints:
+            return []
+        if len(endpoints) == 1:
+            return list(endpoints)
+
+        healthy = [ep for ep in endpoints if self._health.get(self._endpoint_id(ep), True)]
+        dead = [ep for ep in endpoints if not self._health.get(self._endpoint_id(ep), True)]
+        if healthy:
+            idx = self._rr.get(model_name, 0) % len(healthy)
+            self._rr[model_name] = idx + 1
+            healthy = healthy[idx:] + healthy[:idx]
+        return healthy + dead
+
+    def mark_unhealthy(self, ep: Dict[str, Any]) -> None:
+        """Flag an endpoint dead immediately (e.g. on a connection failure),
+        without waiting for the next background probe cycle."""
+        eid = self._endpoint_id(ep)
+        if self._health.get(eid) is not False:
+            logger.info("Endpoint %s marked unhealthy (connection failure)", eid)
+        self._health[eid] = False
+        log_endpoint_health(ep["model_name"], ep["params"].get("api_base", ""), False)
+
     def health_snapshot(self) -> Dict[str, Any]:
         """Human-readable view of monitored endpoints and their status."""
         out: Dict[str, Any] = {}

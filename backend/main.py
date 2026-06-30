@@ -13,7 +13,7 @@ import base64
 from typing import Optional, List, Dict, Any
 import aiohttp
 from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent, AnthropicMessageRequest
-from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech
+from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech, fetch_chat_completion_failover, fetch_chat_completion_stream_failover
 from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
 from lib.auth import metrics_auth_middleware, verify_token, get_username_from_token, verify_auth
 from lib.metric import log_metrics, log_error
@@ -81,6 +81,27 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
     return model  # Complete model config (same shape as a model_list entry)
 
 
+def get_model_candidates(model_name: str, user_key: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Access-checked, failover-ordered endpoint list for a model_name.
+
+    Same authorization as get_model_config, but returns every replica (healthy
+    first, round-robined) so the caller can fail over on connection errors.
+    """
+    if model_name not in user_key['models']:
+        log_error(user_key["name"], 403)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access to the model is forbidden for this user",
+        )
+    candidates = load_balancer.candidates(model_name)
+    if not candidates:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Model not found",
+        )
+    return candidates
+
+
 
 def validate_vision_request(model_config: Dict[str, Any], messages: List[Message]):
     """Validate that vision requests are only made to vision-enabled models"""
@@ -136,7 +157,11 @@ def validate_image_content(content_item: MessageContent):
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_auth)):
-    model_config = get_model_config(request.model, user_key)
+    # Failover-ordered replicas for this model. model_config holds the shared
+    # metadata (cost, limits — identical across replicas); the actual upstream
+    # call walks `candidates` and fails over on connection errors.
+    candidates = get_model_candidates(request.model, user_key)
+    model_config = candidates[0]
     input_tokens_nb = estimate_tokens(message_to_string(request.messages))
     cost_per_input_token = model_config["params"].get("cost_per_input_token", 0)
     cost_per_output_token = model_config["params"].get("cost_per_output_token", 0)
@@ -249,7 +274,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             nonlocal collected_response, collected_chunks
             nonlocal upstream_usage, stream_id, stream_created, stream_model
             try:
-                async for chunk in fetch_chat_completion_stream(model_config, request_data):
+                async for chunk in fetch_chat_completion_stream_failover(candidates, request_data, load_balancer.mark_unhealthy):
                     # Suppress the upstream terminator; we emit a single, well-ordered
                     # terminal sequence (optional usage chunk + [DONE]) ourselves below.
                     if chunk.strip().endswith("[DONE]"):
@@ -395,7 +420,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         )
     else:
         # non-streaming response
-        response_data = await fetch_chat_completion(model_config, request_data)
+        response_data, model_config = await fetch_chat_completion_failover(candidates, request_data, load_balancer.mark_unhealthy)
         response_time = time.time() - start_time
         
         # Extract tokens from response or estimate
