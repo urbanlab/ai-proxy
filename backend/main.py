@@ -229,6 +229,14 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         if 'temperature' in request_data and 'top_p' in request_data:
             # Remove top_p, keep temperature (or vice versa based on your preference)
             request_data.pop('top_p')
+    else:
+        # Even without the whitelist, never forward null-valued top-level params.
+        # Clients (e.g. Cline) may omit optional fields like max_tokens, which
+        # model_dump serializes as null — and some backends (llama.cpp) reject
+        # `max_tokens: null` with "type must be number, but is null" instead of
+        # treating it as absent.
+        request_data = {k: v for k, v in request_data.items() if v is not None}
+
     # Enforce a configured input-token limit, if one is set for this model. When
     # `max_input_tokens` is present we reject over-limit requests with an
     # OpenAI-compatible error instead of silently truncating. When it is not set,
