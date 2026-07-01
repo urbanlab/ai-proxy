@@ -20,10 +20,6 @@ model_list:
       drop_params: false
       provider: "ollama"
       api_key: "no_token"
-      # Optional. If set, requests whose estimated input exceeds this many
-      # tokens are rejected with a 400 context_length_exceeded error. Omit
-      # to disable the check and let the upstream enforce its own limit.
-      max_input_tokens: 25000
       cost_per_input_token: 0.25
       cost_per_output_token: 0.80
       vision: true
@@ -35,7 +31,6 @@ model_list:
       drop_params: true
       provider: "llamacpp"
       api_key: "no_token"
-      max_input_tokens: 25000
       cost_per_token: 0.15
 
   - model_name: gemma-3-27b-it
@@ -45,7 +40,6 @@ model_list:
       drop_params: true
       provider: "vllm"
       api_key: "your-api-key"
-      max_input_tokens: 25000
 
   - model_name: gpt-4o
     params:

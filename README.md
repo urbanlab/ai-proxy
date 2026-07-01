@@ -43,7 +43,6 @@ model_list:
       api_key: "no_token"
       cost_per_input_token: 0.25 # Per million token
       cost_per_output_token: 0.80 # Per million token
-      max_input_tokens: 25000
 
 keys:
   - name: "user"

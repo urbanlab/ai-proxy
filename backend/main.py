@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from prometheus_client import make_asgi_app
 import tempfile
 import io
@@ -237,23 +237,6 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         # treating it as absent.
         request_data = {k: v for k, v in request_data.items() if v is not None}
 
-    # Enforce a configured input-token limit, if one is set for this model. When
-    # `max_input_tokens` is present we reject over-limit requests with an
-    # OpenAI-compatible error instead of silently truncating. When it is not set,
-    # we do nothing and let the upstream enforce its own context window.
-    max_input_tokens = model_config['params'].get('max_input_tokens')
-    if max_input_tokens and input_tokens_nb > max_input_tokens:
-        return JSONResponse(
-            status_code=413,
-            content={
-                "type": "error",
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": "Prompt is too long",
-                },
-            },
-        )
-    
     # Clean up messages to remove None values for Scaleway compatibility
     if "messages" in request_data:
         cleaned_messages = []
@@ -510,13 +493,6 @@ async def create_embedding(request: EmbeddingInput, user_key = Depends(verify_au
             "model": request_data["model"],
             "input": request_data["input"]
         }
-    if model_config['params'].get('max_input_tokens'):
-        # truncate input to fit max_input_tokens
-        total_tokens = sum(len(text.split()) for text in request_data['input'])
-        while total_tokens > model_config['params']['max_input_tokens'] and len(request_data['input']) > 1:
-            removed_text = request_data['input'].pop(0)
-            total_tokens -= len(removed_text.split())
-    
     # Start timing
     start_time = time.time()
     
@@ -751,22 +727,6 @@ async def anthropic_messages(request: AnthropicMessageRequest, raw_request: Requ
     )
     input_tokens_nb = estimate_tokens(input_text)
     cost_per_input = calculate_token_cost(cost_per_input_token, input_tokens_nb)
-
-    # Enforce a configured input-token limit, if one is set for this model. When
-    # `max_input_tokens` is present we reject over-limit requests; otherwise we let
-    # the upstream enforce its own context window.
-    max_input_tokens = model_config["params"].get("max_input_tokens")
-    if max_input_tokens and input_tokens_nb > max_input_tokens:
-        return JSONResponse(
-            status_code=413,
-            content={
-                "type": "error",
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": "Prompt is too long",
-                },
-            },
-        )
 
     start_time = time.time()
     username = get_username_from_token(user_key["token"])
