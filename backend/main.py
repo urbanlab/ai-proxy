@@ -20,6 +20,7 @@ from lib.metric import log_metrics, log_error
 from lib.cost import calculate_token_cost
 from lib.anthropic import fetch_anthropic_messages, fetch_anthropic_messages_stream, extract_text_from_anthropic_messages
 from lib.loadbalancer import LoadBalancer
+from lib.providers import apply_provider_mapping
 import lib.db
 
 
@@ -207,13 +208,21 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
             else:
                 openai_messages.append({"role": message.role, "content": message.content or ""})
         request_data["messages"] = openai_messages
-    
+
     # Use the actual model name from config
     request_data["model"] = model_config['params']['model']
-    
+
+    # Translate OpenAI-standard params into each backend's native equivalents,
+    # keyed on the model's `provider`. Must run before the drop_params whitelist
+    # below so the native keys it emits (grammar/chat_template_kwargs/think) are
+    # in the allowed list and survive.
+    request_data = apply_provider_mapping(request_data, model_config)
+
     if model_config['params'].get('drop_params'):
-        # Keep OpenAI-compatible parameters only
-        allowed_params = ["model", "messages", "stream", "stream_options", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user", "response_format", "tools", "tool_choice"]
+        # Keep OpenAI-compatible parameters only, plus the provider-native keys
+        # emitted by apply_provider_mapping (each is only ever set for the backend
+        # that supports it, so allowing them globally is harmless for the others).
+        allowed_params = ["model", "messages", "stream", "stream_options", "max_tokens", "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty", "user", "response_format", "tools", "tool_choice", "grammar", "chat_template_kwargs", "think"]
         request_data = {k: v for k, v in request_data.items() if k in allowed_params and v is not None}
         
         # Some models don't allow both temperature and top_p

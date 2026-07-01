@@ -50,7 +50,12 @@ class Message(BaseModel):
     tool_call_id: Optional[str] = None
 
 class ResponseFormat(BaseModel):
-    type: str  # "text" or "json_object"
+    # Allow the nested json_schema / schema payload (and any provider-specific
+    # extras) to survive the round-trip. Without this, structured-output requests
+    # lose everything except `type` and strict JSON parsing fails downstream.
+    model_config = {"extra": "allow"}
+
+    type: str  # "text", "json_object", or "json_schema"
 
 class StreamOptions(BaseModel):
     # When include_usage is true, a final usage chunk is emitted before [DONE]

@@ -39,6 +39,7 @@ model_list:
       model: devstral:latest
       api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
       drop_params: true
+      provider: "ollama" # optional, see "Provider mapping" below
       api_key: "no_token"
       cost_per_input_token: 0.25 # Per million token
       cost_per_output_token: 0.80 # Per million token
@@ -62,6 +63,24 @@ docker-compose up -d
 
 The server will be available at `http://localhost:8000`.
 And the docs at `http://localhost:8000/docs`.
+
+## 🔌 Provider mapping
+
+Different backends honor the same OpenAI request parameters through different
+native mechanisms. Set the optional `provider` field on a model to translate
+OpenAI-style parameters into what that backend actually enforces. Omit it for
+OpenAI / Anthropic — their handling is already OpenAI-compatible.
+
+| `provider` | `response_format: {"type": "json_object"}` | `reasoning_effort` |
+| --- | --- | --- |
+| `llamacpp` | injects a JSON grammar (llama.cpp does not enforce `json_object` on its own) | → `chat_template_kwargs.enable_thinking` |
+| `ollama` | native | → native `think` boolean |
+| `vllm` | native | native; `none`/`minimal` normalized to `enable_thinking: false` to avoid vLLM's low/medium/high-only 400 |
+| *(unset)* | passthrough | passthrough |
+
+`json_schema` structured output is passed through unchanged and enforced natively
+on all of the above. `provider` is independent of `drop_params` (which controls
+whether non-OpenAI parameters are stripped before forwarding).
 
 **Setup or update Grafana dashboard**
 

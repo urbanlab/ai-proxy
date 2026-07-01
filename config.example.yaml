@@ -2,32 +2,62 @@ metrics_auth:
   username: admin
   password: your-secure-password
 model_list:
+  # `provider` (optional) selects a per-backend parameter mapping so OpenAI-style
+  # requests are translated into what that backend actually enforces. Omit it for
+  # OpenAI / Anthropic (their native handling is already OpenAI-compatible).
+  #   llamacpp -> response_format json_object becomes a JSON grammar;
+  #               reasoning_effort becomes chat_template_kwargs.enable_thinking
+  #   ollama   -> reasoning_effort becomes the native `think` boolean
+  #               (json_object / json_schema are enforced natively)
+  #   vllm     -> json_object / json_schema stay native; reasoning_effort
+  #               none/minimal is normalized to enable_thinking:false so vLLM's
+  #               low/medium/high-only enum does not 400
+
   - model_name: gemma3
-        params:
-          model: gemma3
-          api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
-          drop_params: false
-          api_key: "no_token"
-          # Optional. If set, requests whose estimated input exceeds this many
-          # tokens are rejected with a 400 context_length_exceeded error. Omit
-          # to disable the check and let the upstream enforce its own limit.
-          max_input_tokens: 25000
-          cost_per_input_token: 0.25
-          cost_per_output_token: 0.80
-          vision: true
-     
-  - model_name: devstral
     params:
-      model: devstral:latest
+      model: gemma3
       api_base: http://ollama-service.ollama.svc.cluster.local:11434/v1
       drop_params: false
+      provider: "ollama"
+      api_key: "no_token"
+      # Optional. If set, requests whose estimated input exceeds this many
+      # tokens are rejected with a 400 context_length_exceeded error. Omit
+      # to disable the check and let the upstream enforce its own limit.
+      max_input_tokens: 25000
+      cost_per_input_token: 0.25
+      cost_per_output_token: 0.80
+      vision: true
+
+  - model_name: devstral
+    params:
+      model: devstral
+      api_base: http://llamacpp-service:8080/v1
+      drop_params: true
+      provider: "llamacpp"
       api_key: "no_token"
       max_input_tokens: 25000
       cost_per_token: 0.15
+
+  - model_name: gemma-3-27b-it
+    params:
+      model: gemma-3-27b-it
+      api_base: https://api.scaleway.ai/<project-id>/v1
+      drop_params: true
+      provider: "vllm"
+      api_key: "your-api-key"
+      max_input_tokens: 25000
+
+  - model_name: gpt-4o
+    params:
+      model: gpt-4o
+      api_base: https://api.openai.com/v1
+      drop_params: true
+      # no provider -> passthrough (OpenAI handles OpenAI params natively)
+      api_key: "sk-..."
 keys:
   - name: "user"
     token: "token"
     models:
-      - "qwen3"
+      - "gemma3"
       - "devstral"
     rpm_limit: 5
