@@ -13,7 +13,7 @@ import base64
 from typing import Optional, List, Dict, Any
 import aiohttp
 from lib.data_types import ChatCompletionRequest, EmbeddingInput, SpeechRequest, Message, MessageContent, AnthropicMessageRequest
-from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech, fetch_chat_completion_failover, fetch_chat_completion_stream_failover
+from lib.openai import fetch_chat_completion, fetch_chat_completion_stream, fetch_embeddings, fetch_transcription, fetch_speech, fetch_chat_completion_failover, fetch_chat_completion_stream_failover, configure_timeouts
 from lib.utils import estimate_tokens, extract_tokens_from_response, fetch_image_as_base64, message_to_string
 from lib.auth import metrics_auth_middleware, verify_token, get_username_from_token, verify_auth
 from lib.metric import log_metrics, log_error
@@ -22,6 +22,19 @@ from lib.anthropic import fetch_anthropic_messages, fetch_anthropic_messages_str
 from lib.loadbalancer import LoadBalancer
 from lib.providers import apply_provider_mapping
 import lib.db
+import logging
+import sys
+
+# Surface our own loggers (load-balancer dispatch/health, upstream failover) to
+# stdout so `kubectl logs` shows routing decisions alongside uvicorn access logs.
+# Uvicorn only configures its own loggers, so app loggers are otherwise silent.
+_diag_handler = logging.StreamHandler(sys.stdout)
+_diag_handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+for _name in ("loadbalancer", "openai_proxy"):
+    _lg = logging.getLogger(_name)
+    _lg.setLevel(logging.INFO)
+    _lg.addHandler(_diag_handler)
+    _lg.propagate = False
 
 
 
@@ -56,6 +69,15 @@ load_balancer = LoadBalancer(
     timeout=CONFIG.get("health_check_timeout", 5),
 )
 
+# Upstream request timeouts (see lib/openai.configure_timeouts). Overridable from
+# config; defaults keep long generations alive while catching a hung endpoint —
+# a common source of empty responses.
+configure_timeouts(
+    connect=CONFIG.get("connect_timeout"),
+    request=CONFIG.get("request_timeout"),
+    stream_idle=CONFIG.get("stream_idle_timeout"),
+)
+
 
 @app.on_event("startup")
 async def _start_load_balancer():
@@ -83,10 +105,14 @@ def get_model_config(model_name: str, user_key: Dict[str, Any]) -> Dict[str, Any
 
 
 def get_model_candidates(model_name: str, user_key: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Access-checked, failover-ordered endpoint list for a model_name.
+    """Access-checked endpoint list for a model_name (declared order, unrotated).
 
-    Same authorization as get_model_config, but returns every replica (healthy
-    first, round-robined) so the caller can fail over on connection errors.
+    Same authorization as get_model_config. Callers use only the first entry for
+    shared, replica-identical metadata (cost/vision/limits); the actual upstream
+    call is dispatched by the load balancer inside the fetch_*_failover helpers.
+    Deliberately does NOT go through `candidates()`/`select()` — those rotate the
+    round-robin counter, and doing so here (once per request, purely for metadata)
+    would desync the counter that dispatch uses and pin all traffic to one replica.
     """
     if model_name not in user_key['models']:
         log_error(user_key["name"], 403)
@@ -94,7 +120,7 @@ def get_model_candidates(model_name: str, user_key: Dict[str, Any]) -> List[Dict
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access to the model is forbidden for this user",
         )
-    candidates = load_balancer.candidates(model_name)
+    candidates = load_balancer.endpoints(model_name)
     if not candidates:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -158,9 +184,10 @@ def validate_image_content(content_item: MessageContent):
 # /chat/completions endpoint
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, user_key = Depends(verify_auth)):
-    # Failover-ordered replicas for this model. model_config holds the shared
-    # metadata (cost, limits — identical across replicas); the actual upstream
-    # call walks `candidates` and fails over on connection errors.
+    # Access-check the model and grab shared metadata (cost, limits — identical
+    # across replicas) from the first replica. The actual upstream call is
+    # dispatched by the load balancer (least-connections + queueing) inside the
+    # fetch_*_failover helpers, which pick and fail over across replicas.
     candidates = get_model_candidates(request.model, user_key)
     model_config = candidates[0]
     input_tokens_nb = estimate_tokens(message_to_string(request.messages))
@@ -273,8 +300,17 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         async def event_generator():
             nonlocal collected_response, collected_chunks
             nonlocal upstream_usage, stream_id, stream_created, stream_model
+            # Hold an explicit handle to the upstream generator so we can aclose()
+            # it in `finally`. If the client disconnects, Starlette throws
+            # GeneratorExit into us; without an explicit aclose the upstream
+            # generator is only finalized later by GC, so its `release(ep)` is
+            # delayed and the endpoint's in-flight slot leaks — with
+            # max_concurrency=1 that pins a GPU as "full" forever and eventually
+            # wedges the whole balancer.
+            upstream = fetch_chat_completion_stream_failover(load_balancer, request.model, request_data)
+            client_gone = False
             try:
-                async for chunk in fetch_chat_completion_stream_failover(candidates, request_data, load_balancer.mark_unhealthy):
+                async for chunk in upstream:
                     # Suppress the upstream terminator; we emit a single, well-ordered
                     # terminal sequence (optional usage chunk + [DONE]) ourselves below.
                     if chunk.strip().endswith("[DONE]"):
@@ -304,6 +340,14 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                         except Exception:
                             pass
                     yield chunk
+            except GeneratorExit:
+                # Client disconnected. We must NOT yield anything else during
+                # GeneratorExit handling (that raises "async generator ignored
+                # GeneratorExit" and aborts cleanup); flag it so the finally
+                # below skips its terminal yields but still runs slot release,
+                # metrics and logging.
+                client_gone = True
+                raise
             except Exception as e:
                 # Yield error in SSE format
                 error_data = {
@@ -314,10 +358,15 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                 }
                 yield f"data: {json.dumps(error_data)}\n\n"
             finally:
+                # Promptly finalize the upstream generator so it releases the
+                # endpoint's concurrency slot now (awaiting here is fine; yielding
+                # is not — hence the client_gone guard on the terminal chunks).
+                await upstream.aclose()
+
                 # If the client requested usage and the upstream did not already
                 # stream a usage object, emit an OpenAI-compatible usage chunk
                 # (empty choices + usage) right before the terminator.
-                if include_usage and upstream_usage is None:
+                if not client_gone and include_usage and upstream_usage is None:
                     completion_tokens = estimate_tokens(collected_response) if collected_response else 0
                     usage_chunk = {
                         "id": stream_id or f"chatcmpl-{int(start_time)}",
@@ -333,8 +382,9 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
                     }
                     yield f"data: {json.dumps(usage_chunk)}\n\n"
 
-                # Send the final [DONE] message
-                yield "data: [DONE]\n\n"
+                # Send the final [DONE] message (skipped if the client already left).
+                if not client_gone:
+                    yield "data: [DONE]\n\n"
 
                 # Calculate metrics — prefer the upstream's real token counts when it
                 # streamed them, otherwise fall back to local estimates.
@@ -420,7 +470,7 @@ async def chat_completions(request: ChatCompletionRequest, user_key = Depends(ve
         )
     else:
         # non-streaming response
-        response_data, model_config = await fetch_chat_completion_failover(candidates, request_data, load_balancer.mark_unhealthy)
+        response_data, model_config = await fetch_chat_completion_failover(load_balancer, request.model, request_data)
         response_time = time.time() - start_time
         
         # Extract tokens from response or estimate

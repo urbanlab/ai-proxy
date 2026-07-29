@@ -29,6 +29,44 @@ def _should_failover(status: int) -> bool:
     return status >= 500 or status in _FAILOVER_STATUS_CODES
 
 
+# Request timeouts (seconds). Overridable from config at startup via
+# configure_timeouts(). We deliberately do NOT bound the total time of a request
+# by the model's generation time — a slow-but-alive model is fine. Instead:
+#   * connect: cap time to establish the TCP/TLS connection.
+#   * request (non-streaming): total wall-clock cap; a non-streaming upstream is
+#     silent until the whole answer is ready, so a per-read idle timeout can't be
+#     used there.
+#   * stream_idle (streaming): max gap between streamed chunks. Catches a GPU that
+#     hangs mid-generation (which otherwise surfaces to the client as an empty
+#     message) without killing a long but actively-streaming response.
+_CONNECT_TIMEOUT = 10
+_REQUEST_TIMEOUT = 600
+_STREAM_IDLE_TIMEOUT = 120
+
+
+def configure_timeouts(connect=None, request=None, stream_idle=None) -> None:
+    """Override upstream request timeouts (called once at startup from config)."""
+    global _CONNECT_TIMEOUT, _REQUEST_TIMEOUT, _STREAM_IDLE_TIMEOUT
+    if connect is not None:
+        _CONNECT_TIMEOUT = connect
+    if request is not None:
+        _REQUEST_TIMEOUT = request
+    if stream_idle is not None:
+        _STREAM_IDLE_TIMEOUT = stream_idle
+
+
+def _request_client_timeout() -> aiohttp.ClientTimeout:
+    return aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT, sock_connect=_CONNECT_TIMEOUT)
+
+
+def _stream_client_timeout() -> aiohttp.ClientTimeout:
+    # total=None: don't cap a long streaming generation; sock_read bounds the idle
+    # gap between chunks so a stalled upstream errors out instead of hanging.
+    return aiohttp.ClientTimeout(
+        total=None, sock_connect=_CONNECT_TIMEOUT, sock_read=_STREAM_IDLE_TIMEOUT
+    )
+
+
 def _endpoint_request(ep: Dict[str, Any], request_data: Dict[str, Any]) -> Tuple[str, Dict[str, str], Dict[str, Any]]:
     """Build (url, headers, body) for a chat completion against one endpoint."""
     url = f"{ep['params']['api_base']}/chat/completions"
@@ -42,76 +80,94 @@ def _endpoint_request(ep: Dict[str, Any], request_data: Dict[str, Any]) -> Tuple
 
 
 async def fetch_chat_completion_failover(
-    candidates: List[Dict[str, Any]],
+    load_balancer: Any,
+    model_name: str,
     request_data: Dict[str, Any],
-    on_dead: Callable[[Dict[str, Any]], None],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Non-streaming request with failover. Tries each candidate in order; on a
-    connection failure or an endpoint-unavailable HTTP status (see
-    _should_failover) marks it dead via on_dead(ep) and moves on. Returns
-    (response_json, endpoint_that_served). Genuine request errors are raised
-    immediately; if every endpoint fails the last error is re-raised."""
+    """Non-streaming request with least-connections dispatch and failover.
+
+    Repeatedly asks the load balancer for the freest untried replica
+    (`acquire`), holding that endpoint's concurrency slot for the whole request
+    and releasing it when done. If a replica is unreachable or returns an
+    endpoint-unavailable status (see _should_failover) it is marked dead and the
+    next replica is tried. Returns (response_json, endpoint_that_served). Genuine
+    request errors are raised immediately; if every endpoint fails the last error
+    is re-raised."""
     last_exc: Optional[HTTPException] = None
-    for ep in candidates:
+    tried: set = set()
+    while True:
+        ep = await load_balancer.acquire(model_name, tried)
+        if ep is None:
+            break
         url, headers, body = _endpoint_request(ep, request_data)
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=_request_client_timeout()) as session:
                 async with session.post(url, headers=headers, json=body) as resp:
                     if resp.status != 200:
                         text = await resp.text()
                         exc = HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
                         if _should_failover(resp.status):
                             logger.warning("Endpoint %s returned %s; failing over to next endpoint", url, resp.status)
-                            on_dead(ep)
+                            load_balancer.mark_unhealthy(ep)
                             last_exc = exc
                             continue
                         raise exc
                     return await resp.json(), ep
         except _CONNECTION_ERRORS as e:
             logger.warning("Connect failed for %s: %s; failing over to next endpoint", url, e)
-            on_dead(ep)
+            load_balancer.mark_unhealthy(ep)
             last_exc = HTTPException(status_code=502, detail=f"Upstream connection failed: {e}")
             continue
+        finally:
+            load_balancer.release(ep)   # sync, cancellation-proof
     if last_exc is not None:
         raise last_exc
     raise HTTPException(status_code=502, detail="No upstream endpoints available")
 
 
 async def fetch_chat_completion_stream_failover(
-    candidates: List[Dict[str, Any]],
+    load_balancer: Any,
+    model_name: str,
     request_data: Dict[str, Any],
-    on_dead: Callable[[Dict[str, Any]], None],
 ) -> AsyncGenerator[str, None]:
-    """Streaming request with failover. The connection to each candidate is
-    established before any bytes are yielded, so failing over to a live replica
-    is fully transparent to the client. Only if every endpoint is unreachable
-    does this raise (surfaced to the client as a stream error)."""
+    """Streaming request with least-connections dispatch and failover. The
+    endpoint's concurrency slot is held for the whole stream and released when it
+    finishes or errors. The connection to each candidate is established before any
+    bytes are yielded, so failing over to a live replica is fully transparent to
+    the client. Only if every endpoint is unreachable does this raise (surfaced to
+    the client as a stream error)."""
     last_exc: Optional[HTTPException] = None
-    for ep in candidates:
+    tried: set = set()
+    while True:
+        ep = await load_balancer.acquire(model_name, tried)
+        if ep is None:
+            break
         url, headers, body = _endpoint_request(ep, request_data)
-        session = aiohttp.ClientSession()
+        session = aiohttp.ClientSession(timeout=_stream_client_timeout())
+        # Everything from here is wrapped so the slot is ALWAYS released for this
+        # `ep`, even if the client disconnects during connect (CancelledError) —
+        # otherwise the in-flight count leaks and the endpoint looks permanently
+        # full. release() is synchronous, so it runs first and can't be cancelled.
         try:
-            resp = await session.post(url, headers=headers, json=body)
-        except _CONNECTION_ERRORS as e:
-            await session.close()
-            logger.warning("Stream connect failed for %s: %s; failing over to next endpoint", url, e)
-            on_dead(ep)
-            last_exc = HTTPException(status_code=502, detail=f"Upstream connection failed: {e}")
-            continue
-
-        if resp.status != 200:
-            text = await resp.text()
-            await session.close()
-            exc = HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
-            if _should_failover(resp.status):
-                logger.warning("Stream endpoint %s returned %s; failing over to next endpoint", url, resp.status)
-                on_dead(ep)
-                last_exc = exc
+            try:
+                resp = await session.post(url, headers=headers, json=body)
+            except _CONNECTION_ERRORS as e:
+                logger.warning("Stream connect failed for %s: %s; failing over to next endpoint", url, e)
+                load_balancer.mark_unhealthy(ep)
+                last_exc = HTTPException(status_code=502, detail=f"Upstream connection failed: {e}")
                 continue
-            raise exc
 
-        # Connected — stream this endpoint to completion, then we're done.
-        try:
+            if resp.status != 200:
+                text = await resp.text()
+                exc = HTTPException(status_code=resp.status, detail=f"Model API error: {text}")
+                if _should_failover(resp.status):
+                    logger.warning("Stream endpoint %s returned %s; failing over to next endpoint", url, resp.status)
+                    load_balancer.mark_unhealthy(ep)
+                    last_exc = exc
+                    continue
+                raise exc
+
+            # Connected — stream this endpoint to completion, then we're done.
             async for line in resp.content:
                 line_str = line.decode('utf-8').strip()
                 if line_str:
@@ -123,7 +179,11 @@ async def fetch_chat_completion_stream_failover(
                         yield f"{line_str}\n\n"
             return
         finally:
-            await session.close()
+            load_balancer.release(ep)   # sync, cancellation-proof — must run first
+            try:
+                await session.close()
+            except Exception:
+                pass
 
     if last_exc is not None:
         raise last_exc
